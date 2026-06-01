@@ -10,8 +10,8 @@ const DOWNGRADE_EMERGENCY_THRESHOLD = 4000;
 // Combat targets per phase — these OVERLAY the dynamic economy targets
 const COMBAT_TARGETS: Record<GamePhase, { warrior: number; ranger: number; healer: number; repairer: number }> = {
     ECONOMY: { warrior: 0, ranger: 0, healer: 0, repairer: 0 },
-    ASSESS:  { warrior: 0, ranger: 0, healer: 0, repairer: 0 },
-    RUSH:    { warrior: 6, ranger: 2, healer: 2, repairer: 0 },
+    ASSESS:  { warrior: 2, ranger: 1, healer: 0, repairer: 0 },  // pre-stage a raid party while scouting
+    RUSH:    { warrior: 8, ranger: 4, healer: 2, repairer: 0 },  // was warrior:6 ranger:2
     DEFEND:  { warrior: 4, ranger: 2, healer: 2, repairer: 2 },
 };
 
