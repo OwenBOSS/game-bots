@@ -1,4 +1,8 @@
-// Builds construction sites, repairs damaged roads, upgrades controller as fallback.
+// Builder works through construction sites in explicit priority order so the most
+// impactful structures are finished first regardless of physical proximity.
+//
+// Priority: containers → extensions → towers → ramparts → roads → repair → upgrade
+
 export function runBuilder(creep: Creep): void {
     if (creep.memory.working && creep.store[RESOURCE_ENERGY] === 0) {
         creep.memory.working = false;
@@ -8,8 +12,7 @@ export function runBuilder(creep: Creep): void {
     }
 
     if (creep.memory.working) {
-        // 1. Finish any construction site
-        const site = creep.pos.findClosestByPath(FIND_CONSTRUCTION_SITES);
+        const site = findBuildTarget(creep);
         if (site) {
             if (creep.build(site) === ERR_NOT_IN_RANGE) {
                 creep.moveTo(site, { reusePath: 5 });
@@ -17,7 +20,7 @@ export function runBuilder(creep: Creep): void {
             return;
         }
 
-        // 2. Repair roads below 50% hits
+        // Repair roads below 50% before falling back to upgrading
         const damagedRoad = creep.pos.findClosestByPath(FIND_STRUCTURES, {
             filter: s => s.structureType === STRUCTURE_ROAD && s.hits < s.hitsMax * 0.5,
         });
@@ -28,7 +31,7 @@ export function runBuilder(creep: Creep): void {
             return;
         }
 
-        // 3. Nothing to build — help upgrade the controller
+        // Nothing left to build — upgrade the controller
         const controller = creep.room.controller;
         if (controller) {
             if (creep.upgradeController(controller) === ERR_NOT_IN_RANGE) {
@@ -43,4 +46,27 @@ export function runBuilder(creep: Creep): void {
             }
         }
     }
+}
+
+// Returns the highest-priority construction site, ignoring distance.
+// Roads are second — they're high value but capped at 10 pending sites at a time
+// by the construction manager, so the builder won't spend forever on them.
+function findBuildTarget(creep: Creep): ConstructionSite | null {
+    const PRIORITY: StructureConstant[] = [
+        STRUCTURE_CONTAINER,   // efficiency gain on every tick once built
+        STRUCTURE_ROAD,        // mobility (capped at 10 sites, so builds fast)
+        STRUCTURE_EXTENSION,   // better spawn bodies (RCL 2+)
+        STRUCTURE_TOWER,       // passive defense (RCL 3+)
+        STRUCTURE_RAMPART,     // protect key structures (RCL 2+)
+    ];
+
+    for (const type of PRIORITY) {
+        const site = creep.pos.findClosestByPath(FIND_CONSTRUCTION_SITES, {
+            filter: s => s.structureType === type,
+        });
+        if (site) return site;
+    }
+
+    // Catch-all for anything else (walls, etc.)
+    return creep.pos.findClosestByPath(FIND_CONSTRUCTION_SITES);
 }

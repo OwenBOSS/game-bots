@@ -1,5 +1,18 @@
-export type GamePhase = 'ECONOMY' | 'ASSESS' | 'RUSH' | 'DEFEND';
-export type CombatState = 'RALLY' | 'MARCH' | 'ENGAGE';
+export type GamePhase     = 'ECONOMY' | 'ASSESS' | 'RUSH' | 'DEFEND';
+export type CombatState   = 'RALLY' | 'MARCH' | 'ENGAGE';
+export type ExpansionState = 'IDLE' | 'CLAIMING' | 'BOOTSTRAPPING' | 'ACTIVE';
+export type TacticType    = 'DIRECT' | 'FLANK' | 'FEINT' | 'MAIN';
+
+export interface PlatoonOrder {
+    tactic: TacticType;
+    waypointRoom?: string;  // FLANK/MAIN: travel through this room first
+    engageTick?: number;    // MAIN: don't enter enemy room until this tick
+    feintEndTick?: number;  // FEINT: retreat after this tick
+}
+export type CreepRole =
+    | 'harvester' | 'hauler' | 'upgrader' | 'builder' | 'repairer'
+    | 'scout' | 'claimer'
+    | 'warrior' | 'ranger' | 'healer';
 
 declare global {
     const console: { log(...args: any[]): void; error(...args: any[]): void };
@@ -10,13 +23,18 @@ declare global {
         enemySpawns: number;
         enemyTowers: number;
         strength: number;
+        hasController: boolean;
+        controllerOwned: boolean;
+        sourceCount: number;
     }
 
     interface CreepMemory {
-        role: 'harvester' | 'builder' | 'scout' | 'warrior';
+        role: CreepRole;
         working: boolean;
         targetRoomName?: string;
         scoutComplete?: boolean;
+        sourceId?: Id<Source>;  // harvesters: assigned source
+        platoonId?: string;     // warriors/rangers: rally group id
     }
 
     interface Memory {
@@ -30,6 +48,32 @@ declare global {
         rallyTick?: number;
         roadsPlanned?: boolean;
         lastRCL?: number;
+        // Economy tracking
+        energyHistory?: { tick: number; avail: number }[];
+        energyStatus?: {
+            netRate: number; trend: number; pct: number;
+            level: 'SURPLUS' | 'STABLE' | 'DEFICIT' | 'CRITICAL';
+        };
+        // Tactics
+        platoonOrders?: Record<string, import('../types').PlatoonOrder>;
+        coordinatedAttackTick?: number;
+        // Expansion
+        expansionState?: ExpansionState;
+        expansionTarget?: string;
+        expansionRoomName?: string;
+        // Analytics log — rolling history, dumpable via JSON.stringify(Memory.statsLog)
+        statsLog?: StatSnapshot[];
+    }
+
+    interface StatSnapshot {
+        tick:    number;
+        phase:   string;
+        rcl:     number;
+        energy:  { avail: number; cap: number };
+        creeps:  Record<string, number>;
+        ctrl:    { pct: number; progress: number; total: number } | null;
+        structs: { roads: number; containers: number; extensions: number; towers: number; ramparts: number };
+        combat:  { state: string; warriors: number; rangers: number; target: string | null };
     }
 }
 
