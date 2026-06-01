@@ -5,17 +5,19 @@ import { CreepRole } from '../types';
 
 export function buildBody(role: CreepRole, budget: number): BodyPartConstant[] | null {
     switch (role) {
-        case 'harvester': return harvesterBody(budget);
-        case 'hauler':    return haulerBody(budget);
-        case 'upgrader':  return upgraderBody(budget);
+        case 'harvester':  return harvesterBody(budget);
+        case 'hauler':     return haulerBody(budget);
+        case 'upgrader':   return upgraderBody(budget);
         case 'builder':
-        case 'repairer':  return workerBody(budget);
-        case 'warrior':   return warriorBody(budget);
-        case 'ranger':    return rangerBody(budget);
-        case 'scout':     return scoutBody(budget);
-        case 'claimer':   return claimerBody(budget);
-        case 'healer':    return healerBody(budget);
-        default:          return null;
+        case 'repairer':   return workerBody(budget);
+        case 'scavenger':  return scavengerBody(budget);
+        case 'courier':    return courierBody(budget);
+        case 'warrior':    return warriorBody(budget);
+        case 'ranger':     return rangerBody(budget);
+        case 'scout':      return scoutBody(budget);
+        case 'claimer':    return claimerBody(budget);
+        case 'healer':     return healerBody(budget);
+        default:           return null;
     }
 }
 
@@ -52,6 +54,22 @@ function workerBody(budget: number): BodyPartConstant[] | null {
     if (budget < 200) return null;
     const units = Math.min(Math.floor(budget / 200), 8);
     return [...r(WORK, units), ...r(CARRY, units), ...r(MOVE, units)];
+}
+
+// Scavenger: fast looter — equal CARRY and MOVE for full-road speed plus TOUGH buffer.
+// Repeat unit [T,C,M] = 180e. Cap at 8 units. Does not need WORK.
+function scavengerBody(budget: number): BodyPartConstant[] | null {
+    if (budget < 180) return null;
+    const units = Math.min(Math.floor(budget / 180), 8);
+    return [...r(TOUGH, units), ...r(CARRY, units), ...r(MOVE, units)];
+}
+
+// Courier: high-carry hauler for inter-room trips on plains (1:1 CARRY:MOVE).
+// Repeat unit [C,M] = 100e. No TOUGH — trips through owned rooms only.
+function courierBody(budget: number): BodyPartConstant[] | null {
+    if (budget < 100) return null;
+    const units = Math.min(Math.floor(budget / 100), 16);
+    return [...r(CARRY, units), ...r(MOVE, units)];
 }
 
 // ─── Combat roles ─────────────────────────────────────────────────────────────

@@ -13,50 +13,49 @@
 
 import { PlatoonOrder, TacticType } from '../types';
 
-const ESTIMATED_TRAVEL_TICKS = 40;  // ticks to reach adjacent enemy room
-const FEINT_DURATION_TICKS   = 150; // how long the feint platoon attacks before retreating
-const MAIN_DELAY_TICKS       = 80;  // main platoon waits this many ticks into the feint
+const ESTIMATED_TRAVEL_TICKS = 40;
+const FEINT_DURATION_TICKS   = 150;
+const MAIN_DELAY_TICKS       = 80;
 
-export function manageTactics(): void {
-    if (Memory.combatState !== 'MARCH') {
-        // Clear orders when not marching so they don't linger into the next RUSH
-        if (Memory.combatState === 'RALLY') {
-            Memory.platoonOrders        = undefined;
-            Memory.coordinatedAttackTick = undefined;
+// Called per room — plans tactics only for combat units homed in this room.
+export function manageTactics(room: Room): void {
+    const state = room.memory.combatState ?? 'RALLY';
+
+    if (state !== 'MARCH') {
+        if (state === 'RALLY') {
+            room.memory.platoonOrders        = undefined;
+            room.memory.coordinatedAttackTick = undefined;
         }
         return;
     }
 
-    if (!Memory.enemyRoomName) return;
-    if (Memory.platoonOrders) return; // already planned this MARCH
+    if (!room.memory.enemyRoomName) return;
+    if (room.memory.platoonOrders) return; // already planned this MARCH
 
-    const platoons = getActivePlatoonIds();
+    const platoons = getActivePlatoonIds(room.name);
     if (platoons.length === 0) return;
 
-    const orders = planTactics(platoons, Memory.enemyRoomName);
-    Memory.platoonOrders = Object.fromEntries(
+    const orders = planTactics(platoons, room.memory.enemyRoomName);
+    room.memory.platoonOrders = Object.fromEntries(
         Object.entries(orders).map(([id, o]) => [id, o as any])
     );
 
     const tactics = Object.values(orders).map(o => o.tactic).join(', ');
-    console.log(`[adaptive] Tactics assigned: [${tactics}] vs ${Memory.enemyRoomName}`);
+    console.log(`[${room.name}] Tactics assigned: [${tactics}] vs ${room.memory.enemyRoomName}`);
 }
 
 // ─── Planning ─────────────────────────────────────────────────────────────────
 
 function planTactics(platoons: string[], enemyRoom: string): Record<string, PlatoonOrder> {
-    const intel    = Memory.roomIntel?.[enemyRoom];
+    const intel     = Memory.roomIntel?.[enemyRoom];
     const hasTowers = (intel?.enemyTowers ?? 0) > 0;
-
     const flankRoom = findFlankRoom(enemyRoom);
 
     if (platoons.length === 1 || !flankRoom) {
-        // Single platoon or no flank available — everyone direct
         return Object.fromEntries(platoons.map(id => [id, { tactic: 'DIRECT' as TacticType }]));
     }
 
     if (platoons.length >= 2 && hasTowers) {
-        // FEINT + MAIN: towers are a serious threat — use misdirection
         const feintId = platoons[0];
         const mainId  = platoons[1];
         return {
@@ -69,14 +68,12 @@ function planTactics(platoons: string[], enemyRoom: string): Record<string, Plat
                 waypointRoom: flankRoom,
                 engageTick:   Game.time + ESTIMATED_TRAVEL_TICKS + MAIN_DELAY_TICKS,
             },
-            // Any additional platoons also go direct
             ...Object.fromEntries(
                 platoons.slice(2).map(id => [id, { tactic: 'DIRECT' as TacticType }])
             ),
         };
     }
 
-    // PINCER: multiple platoons, no towers — enter from different sides
     return {
         [platoons[0]]: { tactic: 'DIRECT' },
         [platoons[1]]: { tactic: 'FLANK', waypointRoom: flankRoom },
@@ -86,27 +83,29 @@ function planTactics(platoons: string[], enemyRoom: string): Record<string, Plat
     };
 }
 
-// Find a room adjacent to the enemy that we can use as a flanking approach.
-// Exclude our own home room (that's the direct route).
 function findFlankRoom(enemyRoom: string): string | null {
     const exits = Game.map.describeExits(enemyRoom);
     if (!exits) return null;
 
-    const homeRoom = Object.keys(Game.rooms).find(r => Game.rooms[r].controller?.my) ?? '';
+    const homeRooms = new Set(
+        Object.keys(Game.rooms).filter(r => Game.rooms[r].controller?.my)
+    );
     const candidates = (Object.values(exits).filter(Boolean) as string[])
-        .filter(r => r !== homeRoom && Game.map.getRoomStatus(r).status === 'normal');
+        .filter(r => !homeRooms.has(r) && Game.map.getRoomStatus(r).status === 'normal');
 
     return candidates[0] ?? null;
 }
 
-function getActivePlatoonIds(): string[] {
+// Only platoons whose fighters are homed in this room.
+function getActivePlatoonIds(homeRoom: string): string[] {
     const ids = new Set<string>();
     for (const name in Game.creeps) {
-        const pid = Game.creeps[name].memory.platoonId;
-        const role = Game.creeps[name].memory.role;
-        if (pid && (role === 'warrior' || role === 'ranger')) {
+        const creep = Game.creeps[name];
+        const pid  = creep.memory.platoonId;
+        const role = creep.memory.role;
+        if (pid && (role === 'warrior' || role === 'ranger') && creep.memory.homeRoom === homeRoom) {
             ids.add(pid);
         }
     }
-    return [...ids].sort(); // deterministic order
+    return [...ids].sort();
 }

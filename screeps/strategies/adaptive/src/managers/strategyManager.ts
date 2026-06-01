@@ -4,108 +4,104 @@ const ECONOMY_CREEP_TARGET    = 5;
 const RUSH_STRENGTH_THRESHOLD = 10;
 const REASSESS_COOLDOWN       = 500;
 const RUSH_TIMEOUT            = 2000;
-// When safe mode has this many ticks left, start building up combat for what comes after
 const SAFE_MODE_PREPARE_TICKS = 2000;
 
 export function updatePhase(room: Room): void {
     // ── Safe mode override ────────────────────────────────────────────────────
-    // During safe mode enemies can't attack us. Use the window for pure economy.
-    // When safe mode is nearly up, transition to ASSESS so we start scouting + building army.
     const safeMode = room.controller?.safeMode ?? 0;
     if (safeMode > 0) {
-        if (Memory.phase !== 'ECONOMY') {
-            Memory.phase = 'ECONOMY';
-            console.log(`[adaptive] Safe mode active (${safeMode} ticks left) → forcing ECONOMY`);
+        if (room.memory.phase !== 'ECONOMY') {
+            room.memory.phase = 'ECONOMY';
+            console.log(`[${room.name}] Safe mode active (${safeMode}t left) → forcing ECONOMY`);
         }
-        if (safeMode < SAFE_MODE_PREPARE_TICKS && Memory.phase === 'ECONOMY') {
-            Memory.phase     = 'ASSESS';
-            Memory.scoutTick = undefined;
-            console.log('[adaptive] Safe mode expiring soon → ASSESS (build for what comes next)');
+        if (safeMode < SAFE_MODE_PREPARE_TICKS && room.memory.phase === 'ECONOMY') {
+            room.memory.phase     = 'ASSESS';
+            room.memory.scoutTick = undefined;
+            console.log(`[${room.name}] Safe mode expiring → ASSESS`);
         }
-        return; // skip normal phase logic while safe mode is active
+        return;
     }
 
     // ── Normal phase machine ─────────────────────────────────────────────────
-    const phase: GamePhase = Memory.phase ?? 'ECONOMY';
+    const phase: GamePhase = room.memory.phase ?? 'ECONOMY';
     if (!Memory.roomIntel) Memory.roomIntel = {};
 
     const myCreeps = room.find(FIND_MY_CREEPS).length;
 
     switch (phase) {
         case 'ECONOMY': {
-            const cooldownDone = !Memory.phaseTick || Game.time >= Memory.phaseTick;
+            const cooldownDone = !room.memory.phaseTick || Game.time >= room.memory.phaseTick;
             if (myCreeps >= ECONOMY_CREEP_TARGET && cooldownDone) {
-                Memory.phase     = 'ASSESS';
-                Memory.phaseTick = Game.time;
-                Memory.scoutTick = undefined;
-                console.log(`[adaptive] → ASSESS at tick ${Game.time}`);
+                room.memory.phase     = 'ASSESS';
+                room.memory.phaseTick = Game.time;
+                room.memory.scoutTick = undefined;
+                console.log(`[${room.name}] → ASSESS at tick ${Game.time}`);
             }
             break;
         }
 
         case 'ASSESS':
-            if (Memory.scoutTick !== undefined) {
-                if (Memory.enemyRoomName && Memory.enemyStrength !== undefined && Memory.enemyStrength > 0) {
-                    Memory.phase     = Memory.enemyStrength <= RUSH_STRENGTH_THRESHOLD ? 'RUSH' : 'DEFEND';
-                    Memory.phaseTick = Game.time;
-                    console.log(`[adaptive] → ${Memory.phase} (enemy strength ${Memory.enemyStrength} in ${Memory.enemyRoomName})`);
+            if (room.memory.scoutTick !== undefined) {
+                const target   = room.memory.enemyRoomName;
+                const strength = room.memory.enemyStrength;
+                if (target && strength !== undefined && strength > 0) {
+                    room.memory.phase     = strength <= RUSH_STRENGTH_THRESHOLD ? 'RUSH' : 'DEFEND';
+                    room.memory.phaseTick = Game.time;
+                    console.log(`[${room.name}] → ${room.memory.phase} (enemy strength ${strength} in ${target})`);
                 } else {
-                    Memory.phase     = 'ECONOMY';
-                    Memory.phaseTick = Game.time + REASSESS_COOLDOWN;
-                    console.log(`[adaptive] → ECONOMY (no enemies, re-assess at tick ${Memory.phaseTick})`);
+                    room.memory.phase     = 'ECONOMY';
+                    room.memory.phaseTick = Game.time + REASSESS_COOLDOWN;
+                    console.log(`[${room.name}] → ECONOMY (no enemies, re-assess at tick ${room.memory.phaseTick})`);
                 }
             }
             break;
 
         case 'RUSH': {
             const combatUnits = room.find(FIND_MY_CREEPS, {
-                filter: c => c.memory.role === 'warrior' || c.memory.role === 'ranger',
+                filter: c => (c.memory.role === 'warrior' || c.memory.role === 'ranger') &&
+                    c.memory.homeRoom === room.name,
             }).length;
 
-            const enemyIntel = Memory.enemyRoomName ? Memory.roomIntel[Memory.enemyRoomName] : undefined;
+            const enemyIntel = room.memory.enemyRoomName ? Memory.roomIntel[room.memory.enemyRoomName] : undefined;
             if (enemyIntel && enemyIntel.strength === 0 && Game.time - enemyIntel.scannedAt < 100) {
-                console.log(`[adaptive] → ECONOMY (RUSH succeeded — ${Memory.enemyRoomName} cleared)`);
-                resetToEconomy();
+                console.log(`[${room.name}] → ECONOMY (RUSH succeeded — ${room.memory.enemyRoomName} cleared)`);
+                resetToEconomy(room);
                 break;
             }
-
             if (combatUnits === 0 && myCreeps > 0) {
-                console.log('[adaptive] → ECONOMY (RUSH failed — no combat units left)');
-                resetToEconomy();
+                console.log(`[${room.name}] → ECONOMY (RUSH failed — no combat units left)`);
+                resetToEconomy(room);
                 break;
             }
-
-            if (myCreeps === 0) { resetToEconomy(); break; }
-
-            if (Memory.phaseTick && Game.time - Memory.phaseTick > RUSH_TIMEOUT) {
-                console.log('[adaptive] → ECONOMY (RUSH timed out)');
-                resetToEconomy();
+            if (myCreeps === 0) { resetToEconomy(room); break; }
+            if (room.memory.phaseTick && Game.time - room.memory.phaseTick > RUSH_TIMEOUT) {
+                console.log(`[${room.name}] → ECONOMY (RUSH timed out)`);
+                resetToEconomy(room);
             }
             break;
         }
 
         case 'DEFEND': {
-            const enemies = room.find(FIND_HOSTILE_CREEPS).length;
-            const enemyIntel = Memory.enemyRoomName ? Memory.roomIntel[Memory.enemyRoomName] : undefined;
+            const enemies     = room.find(FIND_HOSTILE_CREEPS).length;
+            const enemyIntel  = room.memory.enemyRoomName ? Memory.roomIntel[room.memory.enemyRoomName] : undefined;
             const threatCleared = enemyIntel && enemyIntel.strength === 0 && Game.time - enemyIntel.scannedAt < 100;
-
             if (enemies === 0 && threatCleared) {
-                console.log('[adaptive] → ECONOMY (DEFEND succeeded)');
-                resetToEconomy();
+                console.log(`[${room.name}] → ECONOMY (DEFEND succeeded)`);
+                resetToEconomy(room);
             } else if (myCreeps === 0) {
-                resetToEconomy();
+                resetToEconomy(room);
             }
             break;
         }
     }
 }
 
-function resetToEconomy(): void {
-    Memory.phase          = 'ECONOMY';
-    Memory.phaseTick      = undefined;
-    Memory.combatState    = 'RALLY';
-    Memory.roadsPlanned   = false;
-    Memory.enemyRoomName  = undefined;
-    Memory.enemyStrength  = undefined;
-    Memory.scoutTick      = undefined;
+function resetToEconomy(room: Room): void {
+    room.memory.phase         = 'ECONOMY';
+    room.memory.phaseTick     = undefined;
+    room.memory.combatState   = 'RALLY';
+    room.memory.enemyRoomName = undefined;
+    room.memory.enemyStrength = undefined;
+    room.memory.scoutTick     = undefined;
+    Memory.roadsPlanned       = false;
 }

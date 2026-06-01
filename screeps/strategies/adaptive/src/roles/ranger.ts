@@ -14,10 +14,9 @@ export function runRanger(creep: Creep): void {
         return;
     }
 
-    const combatState = Memory.combatState ?? 'RALLY';
+    const homeMemory  = creep.memory.homeRoom ? Game.rooms[creep.memory.homeRoom]?.memory : undefined;
+    const combatState = homeMemory?.combatState ?? 'RALLY';
 
-    // Defense dispatch: when idling at home and assigned a room to defend,
-    // travel there and engage. Does not interrupt an active offense campaign.
     if (combatState === 'RALLY' && creep.memory.defendingRoom) {
         defendRoom(creep);
         return;
@@ -87,8 +86,9 @@ function findTarget(creep: Creep): Creep | AnyOwnedStructure | null {
 }
 
 function executeMarch(creep: Creep): void {
-    const pid    = creep.memory.platoonId;
-    const orders = pid ? Memory.platoonOrders?.[pid] as any : undefined;
+    const pid        = creep.memory.platoonId;
+    const homeMemory = creep.memory.homeRoom ? Game.rooms[creep.memory.homeRoom]?.memory : undefined;
+    const orders     = pid ? homeMemory?.platoonOrders?.[pid] as any : undefined;
     const targetRoom = creep.memory.targetRoomName;
 
     if (orders?.tactic === 'FEINT' && orders.feintEndTick && Game.time > orders.feintEndTick) {

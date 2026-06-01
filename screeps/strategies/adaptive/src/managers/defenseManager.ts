@@ -144,8 +144,11 @@ function dispatchAndRecall(): void {
             // Only dispatch units currently in their home room (they're in RALLY state)
             if (creep.room.name !== creep.memory.homeRoom) continue;
 
-            // Don't pull from an active offense campaign
-            if (Memory.combatState !== 'RALLY') continue;
+            // Don't pull from an active offense campaign in the creep's home room
+            const homeState = creep.memory.homeRoom
+                ? Game.rooms[creep.memory.homeRoom]?.memory.combatState
+                : undefined;
+            if (homeState && homeState !== 'RALLY') continue;
 
             creep.memory.defendingRoom  = threatenedRoom;
             creep.memory.targetRoomName = threatenedRoom;

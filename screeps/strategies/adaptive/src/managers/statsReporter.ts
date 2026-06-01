@@ -1,20 +1,10 @@
-// Logs a compact snapshot every REPORT_INTERVAL ticks AND writes to a rolling
-// in-memory log at LOG_INTERVAL ticks.
-//
-// To dump history from the Screeps console:
-//   JSON.stringify(Memory.statsLog)
-//
-// To get a specific field across history:
-//   Memory.statsLog.map(s => [s.tick, s.rcl, s.energy.avail])
-
-const REPORT_INTERVAL = 50;   // console print frequency
-const LOG_INTERVAL    = 200;  // Memory.statsLog write frequency
-const LOG_MAX_ENTRIES = 500;  // rolling window (~100k ticks at LOG_INTERVAL=200)
+const REPORT_INTERVAL = 50;
+const LOG_INTERVAL    = 200;
+const LOG_MAX_ENTRIES = 500;
 
 export function reportStats(room: Room): void {
     const snap = buildSnapshot(room);
 
-    // Write to rolling memory log (survives disconnect, readable any time)
     if (Game.time % LOG_INTERVAL === 0) {
         if (!Memory.statsLog) Memory.statsLog = [];
         Memory.statsLog.push(snap);
@@ -23,11 +13,9 @@ export function reportStats(room: Room): void {
         }
     }
 
-    // Print to console for live monitoring
     if (Game.time % REPORT_INTERVAL !== 0) return;
 
     const ctrl = room.controller;
-    // Use Game.creeps (global) so warriors/scouts in remote rooms are counted
     const allCreeps = Object.values(Game.creeps);
     const roles: Record<string, number> = {};
     for (const c of allCreeps) roles[c.memory.role] = (roles[c.memory.role] ?? 0) + 1;
@@ -52,7 +40,7 @@ export function reportStats(room: Room): void {
 
     const full = {
         tick:    Game.time,
-        phase:   Memory.phase ?? 'ECONOMY',
+        phase:   room.memory.phase ?? 'ECONOMY',
         rcl:     ctrl?.level ?? 0,
         energy:  { avail: room.energyAvailable, cap: room.energyCapacityAvailable, pct: Math.floor(room.energyAvailable / Math.max(room.energyCapacityAvailable, 1) * 100) },
         controller: ctrl ? { pct: Math.floor(ctrl.progress / Math.max(ctrl.progressTotal, 1) * 100), progress: ctrl.progress, total: ctrl.progressTotal } : null,
@@ -66,12 +54,19 @@ export function reportStats(room: Room): void {
         },
         sites_total: room.find(FIND_CONSTRUCTION_SITES).length,
         economy: room.memory.energyStatus ?? null,
-        combat: { state: Memory.combatState ?? 'RALLY', warriors: roles['warrior'] ?? 0, rangers: roles['ranger'] ?? 0, healers: roles['healer'] ?? 0, target: Memory.enemyRoomName ?? null, tactics: Memory.platoonOrders ?? null },
+        combat:  {
+            state:    room.memory.combatState ?? 'RALLY',
+            warriors: roles['warrior'] ?? 0,
+            rangers:  roles['ranger']  ?? 0,
+            healers:  roles['healer']  ?? 0,
+            target:   room.memory.enemyRoomName ?? null,
+            tactics:  room.memory.platoonOrders ?? null,
+        },
         intel,
         log_entries: Memory.statsLog?.length ?? 0,
     };
 
-    console.log(`=== adaptive:stats:${Game.time} ===`);
+    console.log(`=== adaptive:stats:${room.name}:${Game.time} ===`);
     console.log(JSON.stringify(full));
 }
 
@@ -86,7 +81,7 @@ function buildSnapshot(room: Room): StatSnapshot {
 
     return {
         tick:    Game.time,
-        phase:   Memory.phase ?? 'ECONOMY',
+        phase:   room.memory.phase ?? 'ECONOMY',
         rcl:     ctrl?.level ?? 0,
         energy:  { avail: room.energyAvailable, cap: room.energyCapacityAvailable },
         creeps:  roles,
@@ -99,10 +94,10 @@ function buildSnapshot(room: Room): StatSnapshot {
             ramparts:   count(STRUCTURE_RAMPART),
         },
         combat:  {
-            state:    Memory.combatState ?? 'RALLY',
+            state:    room.memory.combatState ?? 'RALLY',
             warriors: roles['warrior'] ?? 0,
             rangers:  roles['ranger']  ?? 0,
-            target:   Memory.enemyRoomName ?? null,
+            target:   room.memory.enemyRoomName ?? null,
         },
     };
 }

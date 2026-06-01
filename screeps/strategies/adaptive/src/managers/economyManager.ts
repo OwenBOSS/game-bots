@@ -136,6 +136,7 @@ export interface DynamicTargets {
     builder:   number;
     repairer:  number;
     scout:     number;
+    scavenger: number;
 }
 
 export function calcDynamicTargets(room: Room): DynamicTargets {
@@ -188,10 +189,12 @@ export function calcDynamicTargets(room: Room): DynamicTargets {
     // ── Upgrader ──────────────────────────────────────────────────────────────
     const upgrader = hasControllerContainer ? 1 : 0;
 
-    const repairer = 0; // phase override in spawnManager handles DEFEND
-    const scout    = rcl >= 1 ? 1 : 0;
+    const repairer  = 0; // phase override in spawnManager handles DEFEND
+    const scout     = rcl >= 1 ? 1 : 0;
+    // 1 scavenger once containers exist (supply chain is up, loot prevention matters)
+    const scavenger = containers > 0 ? 1 : 0;
 
-    return { harvester, hauler, upgrader, builder, repairer, scout };
+    return { harvester, hauler, upgrader, builder, repairer, scout, scavenger };
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────

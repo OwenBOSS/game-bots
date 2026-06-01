@@ -1,12 +1,10 @@
 import { CombatState } from '../types';
 import { manageTactics } from './tacticsManager';
 
-const MIN_FIGHTERS_TO_MARCH = 4; // warriors + rangers before marching
-const MIN_HEALERS_TO_MARCH  = 1; // at least one healer per group before marching
+const MIN_FIGHTERS_TO_MARCH = 4;
+const MIN_HEALERS_TO_MARCH  = 1;
 const REASSESS_INTERVAL     = 500;
 
-// Safe mode triggers when hostiles are attacking AND defenses are critically low.
-// activateSafeMode() uses one existing charge (no ghodium needed to activate, only to recharge).
 const SAFE_MODE_RAMPART_THRESHOLD = 5_000;
 const SAFE_MODE_OVERWHELM_COUNT   = 5;
 
@@ -14,7 +12,7 @@ export function manageCombat(room: Room): void {
     checkSafeMode(room);
     manageTowers(room);
     manageCombatState(room);
-    manageTactics(); // assigns platoon orders when MARCH begins
+    manageTactics(room);
 }
 
 // ─── Safe mode ────────────────────────────────────────────────────────────────
@@ -38,13 +36,11 @@ function checkSafeMode(room: Room): void {
 
     if (criticalRampart || overwhelmed) {
         ctrl.activateSafeMode();
-        console.log(`[adaptive] ⚠️ SAFE MODE ACTIVATED (hostiles=${dangerousHostiles.length} criticalRampart=${criticalRampart})`);
+        console.log(`[${room.name}] ⚠️ SAFE MODE ACTIVATED (hostiles=${dangerousHostiles.length} criticalRampart=${criticalRampart})`);
     }
 }
 
 // ─── Tower management ────────────────────────────────────────────────────────
-// Attack the enemy with the most ATTACK body parts (biggest threat) when under siege.
-// When clear, repair the most-damaged owned structure.
 
 function manageTowers(room: Room): void {
     const towers = room.find(FIND_MY_STRUCTURES, {
@@ -56,13 +52,11 @@ function manageTowers(room: Room): void {
 
         const hostiles = room.find(FIND_HOSTILE_CREEPS);
         if (hostiles.length > 0) {
-            // Target the most dangerous creep (most ATTACK/RANGED_ATTACK parts)
             const target = hostiles.reduce((a, b) => threatScore(b) > threatScore(a) ? b : a);
             tower.attack(target);
             continue;
         }
 
-        // No enemies — repair most-damaged owned structure
         const damaged = room.find(FIND_MY_STRUCTURES, {
             filter: s => s.hits < s.hitsMax * 0.9,
         });
@@ -77,53 +71,56 @@ function threatScore(creep: Creep): number {
     return creep.body.reduce((n, p) => {
         if (p.type === ATTACK)         return n + 3;
         if (p.type === RANGED_ATTACK)  return n + 2;
-        if (p.type === WORK)           return n + 1; // can dismantle structures
+        if (p.type === WORK)           return n + 1;
         return n;
     }, 0);
 }
 
-// ─── Combat state machine ─────────────────────────────────────────────────────
+// ─── Per-room combat state machine ───────────────────────────────────────────
+// Only considers creeps whose homeRoom matches this room, so multiple rooms
+// can run independent RALLY/MARCH/ENGAGE campaigns simultaneously.
 
 function manageCombatState(room: Room): void {
     const allCombat = room.find(FIND_MY_CREEPS, {
-        filter: c => c.memory.role === 'warrior' || c.memory.role === 'ranger' || c.memory.role === 'healer',
+        filter: c => (c.memory.role === 'warrior' || c.memory.role === 'ranger' || c.memory.role === 'healer') &&
+            c.memory.homeRoom === room.name,
     });
     const fighters = allCombat.filter(c => c.memory.role === 'warrior' || c.memory.role === 'ranger');
     const healers  = allCombat.filter(c => c.memory.role === 'healer');
 
-    const state: CombatState = Memory.combatState ?? 'RALLY';
+    const state: CombatState = room.memory.combatState ?? 'RALLY';
+    const enemyRoom = room.memory.enemyRoomName;
 
     switch (state) {
         case 'RALLY':
-            // Wait for enough fighters AND at least one healer before marching
             if (fighters.length >= MIN_FIGHTERS_TO_MARCH &&
                 healers.length  >= MIN_HEALERS_TO_MARCH  &&
-                Memory.enemyRoomName) {
-                Memory.combatState = 'MARCH';
-                Memory.rallyTick   = Game.time;
-                assignTargetRoom(allCombat, Memory.enemyRoomName);
-                console.log(`[adaptive] Combat → MARCH (${fighters.length} fighters + ${healers.length} healers → ${Memory.enemyRoomName})`);
+                enemyRoom) {
+                room.memory.combatState = 'MARCH';
+                room.memory.rallyTick   = Game.time;
+                assignTargetRoom(allCombat, enemyRoom);
+                console.log(`[${room.name}] Combat → MARCH (${fighters.length}f + ${healers.length}h → ${enemyRoom})`);
             }
             break;
 
         case 'MARCH': {
-            if (fighters.length === 0) { Memory.combatState = 'RALLY'; break; }
-            const inEnemyRoom = fighters.filter(c => c.room.name === Memory.enemyRoomName);
+            if (fighters.length === 0) { room.memory.combatState = 'RALLY'; break; }
+            const inEnemyRoom = fighters.filter(c => c.room.name === enemyRoom);
             if (inEnemyRoom.length > 0) {
-                Memory.combatState = 'ENGAGE';
-                console.log('[adaptive] Combat → ENGAGE');
+                room.memory.combatState = 'ENGAGE';
+                console.log(`[${room.name}] Combat → ENGAGE`);
             }
             break;
         }
 
         case 'ENGAGE':
             if (fighters.length === 0) {
-                Memory.combatState = 'RALLY';
-                console.log('[adaptive] Combat → RALLY (all fighters lost)');
+                room.memory.combatState = 'RALLY';
+                console.log(`[${room.name}] Combat → RALLY (all fighters lost)`);
             }
-            if (Memory.rallyTick && Game.time - Memory.rallyTick > REASSESS_INTERVAL) {
-                Memory.scoutTick = undefined;
-                Memory.rallyTick = Game.time;
+            if (room.memory.rallyTick && Game.time - room.memory.rallyTick > REASSESS_INTERVAL) {
+                room.memory.scoutTick = undefined;
+                room.memory.rallyTick = Game.time;
             }
             break;
     }

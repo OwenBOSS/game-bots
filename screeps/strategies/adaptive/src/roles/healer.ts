@@ -1,7 +1,7 @@
 // Healer: attached to a platoon via creep.memory.platoonId.
 // Follows platoon orders (same as warrior/ranger): respects FEINT timing,
 // MAIN hold-and-wait, FLANK waypoints. Then heals the most wounded ally.
-// All platoons share Memory.combatState so they march and engage in concert.
+// Reads combat state from homeRoom.memory.combatState (per-room FSM).
 
 const HEAL_THRESHOLD = 0.85;
 
@@ -11,10 +11,10 @@ export function runHealer(creep: Creep): void {
         creep.heal(creep);
     }
 
-    const combatState = Memory.combatState ?? 'RALLY';
+    const homeMemory  = creep.memory.homeRoom ? Game.rooms[creep.memory.homeRoom]?.memory : undefined;
+    const combatState = homeMemory?.combatState ?? 'RALLY';
 
     if (combatState === 'RALLY') {
-        // Defense dispatch: travel to assigned room and heal fighters there
         if (creep.memory.defendingRoom) {
             const target = creep.memory.defendingRoom;
             if (creep.room.name !== target) { moveToRoom(creep, target); return; }
@@ -26,8 +26,8 @@ export function runHealer(creep: Creep): void {
     }
 
     // MARCH or ENGAGE — follow the platoon's assigned route
-    const pid    = creep.memory.platoonId;
-    const orders = pid ? Memory.platoonOrders?.[pid] as any : undefined;
+    const pid        = creep.memory.platoonId;
+    const orders     = pid ? homeMemory?.platoonOrders?.[pid] as any : undefined;
     const targetRoom = creep.memory.targetRoomName;
 
     // MAIN tactic: hold home until the feint platoon has drawn fire

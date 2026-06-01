@@ -50,15 +50,19 @@ function recordRoomIntel(room: Room): void {
         sourceCount:     room.find(FIND_SOURCES).length,
     };
 
-    Memory.scoutTick = Game.time;
-
-    if (enemySpawns > 0 || enemyCreeps > 0) {
-        const currentStrength = Memory.enemyRoomName
-            ? (Memory.roomIntel[Memory.enemyRoomName]?.strength ?? Infinity)
-            : Infinity;
-        if (strength < currentStrength) {
-            Memory.enemyRoomName = room.name;
-            Memory.enemyStrength = strength;
+    // Update every owned room's per-room scoutTick and enemyRoomName so each
+    // room's strategy FSM can independently decide whether to RUSH or DEFEND.
+    const ownedRooms = Object.values(Game.rooms).filter(r => r.controller?.my);
+    for (const owned of ownedRooms) {
+        owned.memory.scoutTick = Game.time;
+        if (enemySpawns > 0 || enemyCreeps > 0) {
+            const currentStrength = owned.memory.enemyRoomName
+                ? (Memory.roomIntel[owned.memory.enemyRoomName]?.strength ?? Infinity)
+                : Infinity;
+            if (strength < currentStrength) {
+                owned.memory.enemyRoomName = room.name;
+                owned.memory.enemyStrength = strength;
+            }
         }
     }
 
