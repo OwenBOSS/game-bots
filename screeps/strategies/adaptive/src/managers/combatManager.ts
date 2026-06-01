@@ -1,5 +1,6 @@
 import { CombatState } from '../types';
 import { manageTactics } from './tacticsManager';
+import { manageQuads } from './quadManager';
 
 const MIN_FIGHTERS_TO_MARCH = 4;
 const MIN_HEALERS_TO_MARCH  = 1;
@@ -13,6 +14,7 @@ export function manageCombat(room: Room): void {
     manageTowers(room);
     manageCombatState(room);
     manageTactics(room);
+    manageQuads(room);
 }
 
 // ─── Safe mode ────────────────────────────────────────────────────────────────

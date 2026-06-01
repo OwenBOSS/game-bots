@@ -70,7 +70,6 @@ export function manageSpawns(room: Room): void {
     }
 
     // ── Economy roles — respect energy level ─────────────────────────────────
-    // In DEFICIT/CRITICAL don't spawn new haulers/upgraders (save energy for harvesters)
     const canSpawnEconomy = status.level !== 'CRITICAL';
 
     const ecoRoles: { role: CreepRole; target: number; extra?: Partial<CreepMemory> }[] = [
@@ -86,6 +85,39 @@ export function manageSpawns(room: Room): void {
         for (const { role, target, extra } of ecoRoles) {
             if ((counts[role] ?? 0) < target) {
                 trySpawn(spawn, role, room.energyAvailable, extra);
+                return;
+            }
+        }
+    }
+
+    // ── Remote mining: reservers + remote miners + remote haulers ─────────────
+    if (canSpawnEconomy) {
+        for (const [remoteName, rt] of Object.entries(room.memory.remoteRooms ?? {})) {
+            // Reserver: keep the room reserved
+            const needsReserver = rt.reservedUntil < Game.time + 500;
+            const hasReserver = creeps.some(c =>
+                c.memory.role === 'reserver' && c.memory.targetRoomName === remoteName
+            );
+            if (needsReserver && !hasReserver) {
+                trySpawn(spawn, 'reserver', room.energyAvailable, { targetRoomName: remoteName });
+                return;
+            }
+
+            // Remote miners (harvesters assigned to remoteRoom)
+            const currentMiners = creeps.filter(c =>
+                c.memory.role === 'harvester' && c.memory.remoteRoom === remoteName
+            ).length;
+            if (currentMiners < rt.miners) {
+                trySpawn(spawn, 'harvester', room.energyAvailable, { remoteRoom: remoteName });
+                return;
+            }
+
+            // Remote haulers
+            const currentHaulers = creeps.filter(c =>
+                c.memory.role === 'hauler' && c.memory.remoteRoom === remoteName
+            ).length;
+            if (currentHaulers < rt.haulers) {
+                trySpawn(spawn, 'hauler', room.energyAvailable, { remoteRoom: remoteName });
                 return;
             }
         }

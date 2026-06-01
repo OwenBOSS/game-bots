@@ -162,12 +162,30 @@ export function calcDynamicTargets(room: Room): DynamicTargets {
         : sources.reduce((sum, src) => sum + Math.min(walkableAround(src), MAX_HARVESTERS_PER_SOURCE), 0);
 
     // ── Haulers ───────────────────────────────────────────────────────────────
-    // HAULER_SHORTAGE: double source haulers to drain the backlog
+    // Distance-based: haulers_needed = ceil(source_output × round_trip / hauler_carry)
+    // Source output = 10e/tick; round trip = 2 × path_distance_to_storage (cached).
+    // HAULER_SHORTAGE: add 1 extra hauler per source container to drain the backlog.
     const sourceCntrs = sources.reduce((sum, src) =>
         sum + src.pos.findInRange(FIND_STRUCTURES, 1, { filter: s => s.structureType === STRUCTURE_CONTAINER }).length, 0);
-    const baseHaulers = sourceCntrs + (hasControllerContainer ? 1 : 0);
+
+    const haulerCarry = Math.max(100, Math.min(Math.floor(room.energyCapacityAvailable / 150), 10) * 100);
+    let baseHaulers   = 0;
+    const storage     = room.storage;
+
+    for (const src of sources) {
+        const hasCntr = src.pos.findInRange(FIND_STRUCTURES, 1, {
+            filter: s => s.structureType === STRUCTURE_CONTAINER,
+        }).length > 0;
+        if (!hasCntr) continue;
+
+        const dist = getSourceDistance(room, src, storage);
+        const roundTrip = dist * 2;
+        baseHaulers += Math.max(1, Math.ceil(10 * roundTrip / haulerCarry));
+    }
+    if (hasControllerContainer) baseHaulers += 1;
+
     const hauler = bottleneck === 'HAULER_SHORTAGE'
-        ? baseHaulers + sourceCntrs  // +1 hauler per backed-up source container
+        ? baseHaulers + sourceCntrs
         : baseHaulers;
 
     // ── Builders ──────────────────────────────────────────────────────────────
@@ -206,6 +224,36 @@ function avgField(
 ): number {
     if (samples.length === 0) return fallback;
     return samples.reduce((s, x) => s + (x[field] ?? fallback), 0) / samples.length;
+}
+
+// ─── Distance caching ─────────────────────────────────────────────────────────
+// PathFinder is expensive; cache source→storage distances in room.memory so we
+// only recalculate when storage appears/disappears or every 5000 ticks.
+
+const DISTANCE_RECALC_INTERVAL = 5000;
+
+function getSourceDistance(room: Room, source: Source, storage: StructureStorage | undefined): number {
+    if (!room.memory.sourceDistances) room.memory.sourceDistances = {};
+    const key       = source.id as string;
+    const cached    = room.memory.sourceDistances[key];
+    const lastCalc  = (room.memory as any)[`_distTick_${key}`] as number | undefined;
+
+    if (cached !== undefined && lastCalc && Game.time - lastCalc < DISTANCE_RECALC_INTERVAL) {
+        return cached;
+    }
+
+    // Recalculate via PathFinder
+    const dest = storage?.pos ?? room.controller?.pos;
+    let dist   = 15; // conservative default when no storage yet
+
+    if (dest) {
+        const result = PathFinder.search(source.pos, { pos: dest, range: 1 }, { plainCost: 1, swampCost: 2, maxOps: 2000 });
+        if (!result.incomplete) dist = result.path.length;
+    }
+
+    room.memory.sourceDistances[key] = dist;
+    (room.memory as any)[`_distTick_${key}`] = Game.time;
+    return dist;
 }
 
 function walkableAround(source: Source): number {

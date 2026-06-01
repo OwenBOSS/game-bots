@@ -1,7 +1,16 @@
 // Stationary harvester: parks at an assigned source, harvests into the adjacent
 // container. Falls back to mobile delivery if no container exists yet.
+//
+// Remote mode (creep.memory.remoteRoom set): travels to the remote room and
+// mines there. Energy drops into the remote container for remote haulers to collect.
 
 export function runHarvester(creep: Creep): void {
+    // Remote mode: mine in a reserved room — remote haulers carry energy home
+    if (creep.memory.remoteRoom) {
+        runRemote(creep);
+        return;
+    }
+
     const source = getAssignedSource(creep);
     if (!source) return;
 
@@ -14,17 +23,48 @@ export function runHarvester(creep: Creep): void {
     }
 }
 
+// ─── Remote mode ─────────────────────────────────────────────────────────────
+
+function runRemote(creep: Creep): void {
+    const target = creep.memory.remoteRoom!;
+
+    if (creep.room.name !== target) {
+        moveToRoom(creep, target);
+        return;
+    }
+
+    // Assign a source in this room (same least-contested logic)
+    const source = getAssignedSource(creep);
+    if (!source) return;
+
+    const container = findNearbyContainer(source);
+    if (container) {
+        // Park on container and mine into it — remote hauler will collect
+        if (!creep.pos.isEqualTo(container.pos)) {
+            creep.moveTo(container.pos, { reusePath: 10 });
+            return;
+        }
+        creep.harvest(source);
+        if (creep.store.getFreeCapacity() === 0) {
+            creep.transfer(container, RESOURCE_ENERGY);
+        }
+    } else {
+        // No container yet — mine and drop on ground (remote hauler picks up dropped)
+        if (creep.harvest(source) === ERR_NOT_IN_RANGE) {
+            creep.moveTo(source, { reusePath: 5 });
+        }
+    }
+}
+
 // ─── Stationary mode ─────────────────────────────────────────────────────────
 
 function runStationary(creep: Creep, source: Source, container: StructureContainer): void {
-    // Move onto the container tile to mine directly into it
     if (!creep.pos.isEqualTo(container.pos)) {
         creep.moveTo(container.pos, { reusePath: 10, visualizePathStyle: undefined });
         return;
     }
     creep.harvest(source);
     if (creep.store.getFreeCapacity() === 0) {
-        // Prefer a link over the container — links teleport energy instantly, no hauler trip needed
         const link = source.pos.findInRange(FIND_MY_STRUCTURES, 2, {
             filter: s =>
                 s.structureType === STRUCTURE_LINK &&
@@ -56,8 +96,6 @@ function runMobile(creep: Creep, source: Source): void {
                 creep.moveTo(target, { reusePath: 5 });
             }
         } else {
-            // Nothing else needs energy — upgrade RC as a productive last resort.
-            // This is intentional: surplus energy is better spent on RCL than wasted.
             const controller = creep.room.controller;
             if (controller && creep.upgradeController(controller) === ERR_NOT_IN_RANGE) {
                 creep.moveTo(controller, { reusePath: 5 });
@@ -76,9 +114,8 @@ function getAssignedSource(creep: Creep): Source | null {
     if (creep.memory.sourceId) {
         return Game.getObjectById(creep.memory.sourceId);
     }
-    // Assign to the least-contested source
     const sources = creep.room.find(FIND_SOURCES);
-    const counts = new Map<Id<Source>, number>();
+    const counts  = new Map<Id<Source>, number>();
     for (const c of creep.room.find(FIND_MY_CREEPS)) {
         if (c.memory.role === 'harvester' && c.memory.sourceId) {
             counts.set(c.memory.sourceId, (counts.get(c.memory.sourceId) ?? 0) + 1);
@@ -115,4 +152,12 @@ function findDeliveryTarget(creep: Creep): AnyOwnedStructure | null {
             return false;
         },
     });
+}
+
+function moveToRoom(creep: Creep, roomName: string): void {
+    const exitDir = creep.room.findExitTo(roomName);
+    if (exitDir !== ERR_NO_PATH && exitDir !== ERR_INVALID_ARGS) {
+        const exit = creep.pos.findClosestByRange(exitDir);
+        if (exit) creep.moveTo(exit, { reusePath: 5 });
+    }
 }
