@@ -49,10 +49,15 @@ declare global {
         roadsPlanned?: boolean;
         lastRCL?: number;
         // Economy tracking
-        energyHistory?: { tick: number; avail: number }[];
+        energyHistory?: {
+            tick: number; avail: number;
+            containerFillPct?: number;   // avg fill % across all containers (0–100)
+            sourceDepletedPct?: number;  // % of sources currently at 0 energy (0–100)
+        }[];
         energyStatus?: {
             netRate: number; trend: number; pct: number;
             level: 'SURPLUS' | 'STABLE' | 'DEFICIT' | 'CRITICAL';
+            bottleneck: 'HARVESTER_SHORTAGE' | 'HAULER_SHORTAGE' | 'SOURCE_MAXED' | 'BALANCED';
         };
         // Tactics
         platoonOrders?: Record<string, import('../types').PlatoonOrder>;

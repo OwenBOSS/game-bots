@@ -77,6 +77,19 @@ function collectEnergy(creep: Creep): void {
         if (creep.pickup(dropped) === ERR_NOT_IN_RANGE) {
             creep.moveTo(dropped, { reusePath: 3 });
         }
+        return;
+    }
+
+    // Bootstrap fallback: before the first container exists, harvest directly so
+    // the builder can build those first containers and unblock the supply chain.
+    const hasContainers = creep.room.find(FIND_STRUCTURES, {
+        filter: s => s.structureType === STRUCTURE_CONTAINER,
+    }).length > 0;
+    if (!hasContainers) {
+        const source = creep.pos.findClosestByPath(FIND_SOURCES_ACTIVE);
+        if (source && creep.harvest(source) === ERR_NOT_IN_RANGE) {
+            creep.moveTo(source, { reusePath: 5 });
+        }
     }
 }
 
