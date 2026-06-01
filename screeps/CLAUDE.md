@@ -4,7 +4,7 @@
 TypeScript bots for Screeps World (shard3) and Season 10 free event. One deployable strategy per subfolder; each compiles to a single `dist/main.js` bundled by rollup.
 
 ## Active Strategy
-`strategies/adaptive/` — the production bot. ECONOMY→ASSESS→RUSH/DEFEND phase machine with 9 creep roles and dynamic body scaling.
+`strategies/adaptive/` — production bot. ECONOMY→ASSESS→RUSH/DEFEND phase machine, 10 creep roles, dynamic body scaling, bottleneck-aware economy, and multi-room defense coordination.
 
 ## Deploy Workflow
 ```bash
@@ -17,23 +17,42 @@ Scripts land at: `C:\Users\owenb\AppData\Local\Screeps\scripts\screeps.com\<stra
 ## Strategy Branches
 | Folder | Screeps Branch | Purpose |
 |--------|---------------|---------|
-| `adaptive` | adaptive | Production bot |
-| `economy-first` | economy-first | Economy baseline |
+| `adaptive` | adaptive | Production bot — see `adaptive/CLAUDE.md` |
+| `economy-first` | economy-first | Economy baseline (no combat) |
 | `rush` | rush | Aggressive early attack |
 | `season10` | season10 | Score-collection (Season events) |
 
 ## Key Design Decisions
-- **Stationary harvesters** park on source containers; **haulers** do energy delivery
+- **Stationary harvesters** park on source containers; **haulers** do all energy delivery
+- **Builders** collect from containers only — no source competition with harvesters
+- **Economy bottleneck detection** — spawn targets adapt to HARVESTER_SHORTAGE / HAULER_SHORTAGE / SOURCE_MAXED each tick
+- **Multi-room defense** — scouts patrol all owned room borders at 100t refresh; `defenseManager` dispatches idle combat units cross-room on ACTIVE threat
 - **bodyBuilder.ts** scales all creep bodies to available energy budget dynamically
-- **9 roles** cover all Screeps body part types; see `strategies/adaptive/src/roles/`
 - **Expansion** auto-triggers at RCL 4 + available GCL slot
-- **Tower management** built into combatManager (attack enemies → repair structures)
+- **Energy tracking is per-room** (`room.memory.energyStatus`) — safe for multi-room ownership
 
-## Analytics
-In-game: `JSON.stringify(Memory.statsLog)` dumps rolling stats history (last ~500 snapshots).
-For deeper review: see `AGENTS.md` and `scripts/review_strategy.py`.
+## In-Game Debugging
+```js
+// Live economy status for a room (run in Screeps console):
+JSON.stringify(Game.rooms['W1N1'].memory.energyStatus)
+
+// Active defense threats:
+JSON.stringify(Memory.roomThreats)
+
+// Rolling stats history (last ~500 snapshots):
+JSON.stringify(Memory.statsLog)
+
+// Specific field over time:
+Memory.statsLog.map(s => [s.tick, s.rcl, s.energy.avail])
+
+// Scout intel on adjacent rooms:
+JSON.stringify(Memory.roomIntel)
+```
 
 ## References
+- `strategies/adaptive/CLAUDE.md` — full manager execution order, Memory registry, symbol index
+- `strategies/adaptive/src/managers/CLAUDE.md` — per-manager exports, constants, spawn priority
+- `strategies/adaptive/src/roles/CLAUDE.md` — per-role behavior, constants, CreepMemory fields
 - `docs/getting-started.md` — Screeps concepts and API patterns
 - `docs/screeps-world-api.md` — key API patterns and gotchas
 - `experiments/` — logged test runs
