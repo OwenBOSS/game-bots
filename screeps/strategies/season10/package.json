@@ -1,0 +1,20 @@
+{
+  "name": "@screeps-bots/season10",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "rollup -c",
+    "watch": "rollup -c --watch",
+    "clean": "rimraf dist",
+    "deploy": "rollup -c && node -e \"const fs=require('fs'),p='C:/Users/owenb/AppData/Local/Screeps/scripts/screeps.com/season10';fs.mkdirSync(p,{recursive:true});fs.copyFileSync('dist/main.js',p+'/main.js');console.log('Deployed to branch: season10')\""
+  },
+  "devDependencies": {
+    "@rollup/plugin-typescript": "^11.1.6",
+    "@types/screeps": "^3.1.8",
+    "rimraf": "^5.0.5",
+    "rollup": "^4.9.0",
+    "tslib": "^2.6.2",
+    "typescript": "^5.3.3"
+  }
+}
