@@ -23,11 +23,40 @@ export function runBuilder(creep: Creep): void {
             }
         }
     } else {
-        const source = creep.pos.findClosestByPath(FIND_SOURCES_ACTIVE);
-        if (source) {
-            if (creep.harvest(source) === ERR_NOT_IN_RANGE) {
-                creep.moveTo(source, { reusePath: 5 });
-            }
+        collectEnergy(creep);
+    }
+}
+
+function collectEnergy(creep: Creep): void {
+    const containers = creep.room.find(FIND_STRUCTURES, {
+        filter: s =>
+            s.structureType === STRUCTURE_CONTAINER &&
+            (s as StructureContainer).store[RESOURCE_ENERGY] >= 50,
+    }) as StructureContainer[];
+    if (containers.length > 0) {
+        const target = containers.reduce((a, b) =>
+            a.store[RESOURCE_ENERGY] >= b.store[RESOURCE_ENERGY] ? a : b
+        );
+        if (creep.withdraw(target, RESOURCE_ENERGY) === ERR_NOT_IN_RANGE) {
+            creep.moveTo(target, { reusePath: 5 });
+        }
+        return;
+    }
+
+    const storage = creep.room.storage;
+    if (storage && storage.store[RESOURCE_ENERGY] >= 200) {
+        if (creep.withdraw(storage, RESOURCE_ENERGY) === ERR_NOT_IN_RANGE) {
+            creep.moveTo(storage, { reusePath: 5 });
+        }
+        return;
+    }
+
+    const dropped = creep.pos.findClosestByPath(FIND_DROPPED_RESOURCES, {
+        filter: r => r.resourceType === RESOURCE_ENERGY && r.amount >= 50,
+    });
+    if (dropped) {
+        if (creep.pickup(dropped) === ERR_NOT_IN_RANGE) {
+            creep.moveTo(dropped, { reusePath: 3 });
         }
     }
 }
