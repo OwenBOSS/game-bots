@@ -11,7 +11,7 @@ export interface PlatoonOrder {
 }
 export type CreepRole =
     | 'harvester' | 'hauler' | 'upgrader' | 'builder' | 'repairer'
-    | 'scout' | 'claimer'
+    | 'scout' | 'claimer' | 'scavenger' | 'courier'
     | 'warrior' | 'ranger' | 'healer';
 
 declare global {
@@ -28,36 +28,63 @@ declare global {
         sourceCount: number;
     }
 
+    interface RoomThreat {
+        detectedAt:   number;  // tick when first detected
+        lastSeenAt:   number;  // most recent confirmation tick
+        hostileCount: number;
+        strength:     number;  // sum of threat scores across all dangerous hostiles
+        severity:     'WARNING' | 'ACTIVE';
+        fromRoom?:    string;  // adjacent room where scouts first saw the threat approaching
+    }
+
     interface CreepMemory {
         role: CreepRole;
         working: boolean;
         targetRoomName?: string;
         scoutComplete?: boolean;
-        sourceId?: Id<Source>;  // harvesters: assigned source
-        platoonId?: string;     // warriors/rangers: rally group id
+        sourceId?: Id<Source>;   // harvesters: assigned source
+        platoonId?: string;      // warriors/rangers: rally group id
+        homeRoom?: string;       // room this creep was spawned in; used for retreat and dispatch recall
+        defendingRoom?: string;  // set by defenseManager when this unit is dispatched to a remote room
+        scavengeRoom?: string;   // scavengers: optional remote room to loot after own room is clear
+        courierTarget?: string;  // couriers: destination room to deliver energy to
     }
 
-    interface Memory {
-        phase?: GamePhase;
-        roomIntel: Record<string, RoomIntel>;
-        enemyRoomName?: string;
-        enemyStrength?: number;
-        scoutTick?: number;
-        phaseTick?: number;
-        combatState?: CombatState;
-        rallyTick?: number;
-        roadsPlanned?: boolean;
-        lastRCL?: number;
-        // Economy tracking
-        energyHistory?: { tick: number; avail: number }[];
+    // Per-room economy tracking (stored on room.memory so multi-room setups don't clobber each other)
+    interface RoomMemory {
+        energyHistory?: {
+            tick: number; avail: number;
+            containerFillPct?: number;   // avg fill % across all containers (0–100)
+            sourceDepletedPct?: number;  // % of sources currently at 0 energy (0–100)
+        }[];
         energyStatus?: {
             netRate: number; trend: number; pct: number;
             level: 'SURPLUS' | 'STABLE' | 'DEFICIT' | 'CRITICAL';
+            bottleneck: 'HARVESTER_SHORTAGE' | 'HAULER_SHORTAGE' | 'SOURCE_MAXED' | 'BALANCED';
         };
-        // Tactics
+        // Per-room offense — each owned room runs its own phase + combat FSM independently
+        phase?: import('../types').GamePhase;
+        phaseTick?: number;            // tick of last phase change (used for cooldowns + timeouts)
+        scoutTick?: number;            // tick scout completed intel on target room
+        combatState?: import('../types').CombatState;
+        rallyTick?: number;            // tick MARCH began (used for reassess interval)
+        enemyRoomName?: string;         // current offensive target for this room
+        enemyStrength?: number;         // strength score of that target
         platoonOrders?: Record<string, import('../types').PlatoonOrder>;
         coordinatedAttackTick?: number;
-        // Expansion
+        // Inter-room energy balance
+        energySurplus?: number;         // computed by transferManager: excess e/tick this room can donate
+    }
+
+    interface Memory {
+        // Shared global intel — written by scout.ts, read by all rooms
+        roomIntel: Record<string, RoomIntel>;
+        // Construction planning — global since construction sites are room-scoped
+        roadsPlanned?: boolean;
+        lastRCL?: number;
+        // Per-room threat registry — key is the name of OUR room being threatened
+        roomThreats?: Record<string, RoomThreat>;
+        // Expansion (one expansion campaign at a time, global FSM)
         expansionState?: ExpansionState;
         expansionTarget?: string;
         expansionRoomName?: string;

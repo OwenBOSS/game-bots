@@ -20,10 +20,10 @@ export function manageSpawns(room: Room): void {
     if (spawns.length === 0) return;
 
     const spawn   = spawns[0];
-    const phase   = Memory.phase ?? 'ECONOMY';
+    const phase   = room.memory.phase ?? 'ECONOMY';
     const creeps  = room.find(FIND_MY_CREEPS);
     const counts  = countByRole(creeps);
-    const status  = Memory.energyStatus ?? { netRate: 0, trend: 0, pct: 50, level: 'STABLE' as EnergyLevel };
+    const status  = room.memory.energyStatus ?? { netRate: 0, trend: 0, pct: 50, level: 'STABLE' as EnergyLevel, bottleneck: 'BALANCED' as const };
 
     // Dynamic economy targets based on actual room state
     const eco = calcDynamicTargets(room);
@@ -57,22 +57,49 @@ export function manageSpawns(room: Room): void {
         return;
     }
 
+    // ── Local defense: room under active attack → spawn defenders before eco ─
+    const localThreat = Memory.roomThreats?.[room.name]?.severity === 'ACTIVE';
+    if (localThreat && !inSafeMode && room.energyAvailable >= MIN_COMBAT_ENERGY) {
+        if ((counts.repairer ?? 0) < 2) { trySpawn(spawn, 'repairer', room.energyAvailable); return; }
+        if ((counts.warrior  ?? 0) < 4) { trySpawn(spawn, 'warrior',  room.energyAvailable, { platoonId: assignWarriorPlatoon(creeps) }); return; }
+        if ((counts.ranger   ?? 0) < 2) { trySpawn(spawn, 'ranger',   room.energyAvailable, { platoonId: assignWarriorPlatoon(creeps) }); return; }
+        if ((counts.healer   ?? 0) < 1) {
+            const pid = assignHealerPlatoon(creeps);
+            if (pid) { trySpawn(spawn, 'healer', room.energyAvailable, { platoonId: pid }); return; }
+        }
+    }
+
     // ── Economy roles — respect energy level ─────────────────────────────────
     // In DEFICIT/CRITICAL don't spawn new haulers/upgraders (save energy for harvesters)
     const canSpawnEconomy = status.level !== 'CRITICAL';
 
-    const ecoRoles: { role: CreepRole; target: number }[] = [
+    const ecoRoles: { role: CreepRole; target: number; extra?: Partial<CreepMemory> }[] = [
         { role: 'harvester', target: eco.harvester },
         { role: 'builder',   target: eco.builder   },
         { role: 'hauler',    target: eco.hauler     },
         { role: 'upgrader',  target: eco.upgrader   },
         { role: 'scout',     target: eco.scout      },
+        { role: 'scavenger', target: eco.scavenger  },
     ];
 
     if (canSpawnEconomy) {
-        for (const { role, target } of ecoRoles) {
+        for (const { role, target, extra } of ecoRoles) {
             if ((counts[role] ?? 0) < target) {
-                trySpawn(spawn, role, room.energyAvailable);
+                trySpawn(spawn, role, room.energyAvailable, extra);
+                return;
+            }
+        }
+    }
+
+    // Courier: spawn when a deficit neighbor room needs energy and we have surplus
+    if (canSpawnEconomy && (room.memory.energySurplus ?? 0) > 0) {
+        const deficitRoom = findDeficitNeighbor(room);
+        if (deficitRoom) {
+            const existingCouriers = creeps.filter(c =>
+                c.memory.role === 'courier' && c.memory.courierTarget === deficitRoom
+            ).length;
+            if (existingCouriers < 2) {
+                trySpawn(spawn, 'courier', room.energyAvailable, { courierTarget: deficitRoom });
                 return;
             }
         }
@@ -109,11 +136,11 @@ export function manageSpawns(room: Room): void {
 // ─── Prune excess creeps ──────────────────────────────────────────────────────
 
 export function pruneExcessCreeps(room: Room): void {
-    const phase    = Memory.phase ?? 'ECONOMY';
+    const phase    = room.memory.phase ?? 'ECONOMY';
     const creeps   = room.find(FIND_MY_CREEPS);
     const counts   = countByRole(creeps);
-    const phaseAge = Memory.phaseTick ? Game.time - Memory.phaseTick : 0;
-    const status   = Memory.energyStatus;
+    const phaseAge = room.memory.phaseTick ? Game.time - room.memory.phaseTick : 0;
+    const status   = room.memory.energyStatus;
 
     // Suicide combat units after sustained ECONOMY (they're RUSH leftovers)
     if (phase === 'ECONOMY' && phaseAge > 500) {
@@ -186,6 +213,22 @@ function buildPlatoonMap(creeps: Creep[]): Record<string, { fighters: number; ha
     return map;
 }
 
+// Returns the name of an adjacent owned room that needs energy, or null.
+function findDeficitNeighbor(room: Room): string | null {
+    const exits = Game.map.describeExits(room.name);
+    if (!exits) return null;
+    const neighbors = Object.values(exits).filter((r): r is string => !!r);
+
+    for (const neighbor of neighbors) {
+        const nr = Game.rooms[neighbor];
+        if (!nr?.controller?.my) continue;
+        const nStorage = nr.storage;
+        if (!nStorage) continue;
+        if (nStorage.store[RESOURCE_ENERGY] < 10_000) return neighbor;
+    }
+    return null;
+}
+
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
 function trySpawn(
@@ -199,7 +242,7 @@ function trySpawn(
 
     const name   = `${role}_${Game.time}`;
     const result = spawn.spawnCreep(body, name, {
-        memory: { role, working: false, ...extraMemory } as CreepMemory,
+        memory: { role, working: false, homeRoom: spawn.room.name, ...extraMemory } as CreepMemory,
     });
     if (result === OK) {
         const cost    = body.reduce((s, p) => s + BODYPART_COST[p], 0);

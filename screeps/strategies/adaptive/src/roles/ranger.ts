@@ -14,7 +14,13 @@ export function runRanger(creep: Creep): void {
         return;
     }
 
-    const combatState = Memory.combatState ?? 'RALLY';
+    const homeMemory  = creep.memory.homeRoom ? Game.rooms[creep.memory.homeRoom]?.memory : undefined;
+    const combatState = homeMemory?.combatState ?? 'RALLY';
+
+    if (combatState === 'RALLY' && creep.memory.defendingRoom) {
+        defendRoom(creep);
+        return;
+    }
 
     switch (combatState) {
         case 'RALLY':
@@ -25,6 +31,12 @@ export function runRanger(creep: Creep): void {
             executeMarch(creep);
             break;
     }
+}
+
+function defendRoom(creep: Creep): void {
+    const target = creep.memory.defendingRoom!;
+    if (creep.room.name !== target) { moveToRoom(creep, target); return; }
+    engage(creep);
 }
 
 function engage(creep: Creep): void {
@@ -74,8 +86,9 @@ function findTarget(creep: Creep): Creep | AnyOwnedStructure | null {
 }
 
 function executeMarch(creep: Creep): void {
-    const pid    = creep.memory.platoonId;
-    const orders = pid ? Memory.platoonOrders?.[pid] as any : undefined;
+    const pid        = creep.memory.platoonId;
+    const homeMemory = creep.memory.homeRoom ? Game.rooms[creep.memory.homeRoom]?.memory : undefined;
+    const orders     = pid ? homeMemory?.platoonOrders?.[pid] as any : undefined;
     const targetRoom = creep.memory.targetRoomName;
 
     if (orders?.tactic === 'FEINT' && orders.feintEndTick && Game.time > orders.feintEndTick) {
@@ -158,17 +171,15 @@ function stagingArea(room: Room, spawn: StructureSpawn): RoomPosition {
 }
 
 function isHome(creep: Creep): boolean {
+    const home = creep.memory.homeRoom;
+    if (home) return creep.room.name === home;
     return !!Game.rooms[creep.room.name]?.controller?.my;
 }
 
 function travelHome(creep: Creep): void {
-    const homeRoom = Object.keys(Game.rooms).find(r => Game.rooms[r].controller?.my);
-    if (!homeRoom) return;
-    const exitDir = creep.room.findExitTo(homeRoom);
-    if (exitDir !== ERR_NO_PATH && exitDir !== ERR_INVALID_ARGS) {
-        const exit = creep.pos.findClosestByRange(exitDir);
-        if (exit) creep.moveTo(exit, { reusePath: 3 });
-    }
+    const dest = creep.memory.homeRoom ??
+        Object.keys(Game.rooms).find(r => Game.rooms[r]?.controller?.my);
+    if (dest) moveToRoom(creep, dest);
 }
 
 function moveToRoom(creep: Creep, roomName: string): void {

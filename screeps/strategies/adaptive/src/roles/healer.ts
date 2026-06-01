@@ -1,7 +1,7 @@
 // Healer: attached to a platoon via creep.memory.platoonId.
 // Follows platoon orders (same as warrior/ranger): respects FEINT timing,
 // MAIN hold-and-wait, FLANK waypoints. Then heals the most wounded ally.
-// All platoons share Memory.combatState so they march and engage in concert.
+// Reads combat state from homeRoom.memory.combatState (per-room FSM).
 
 const HEAL_THRESHOLD = 0.85;
 
@@ -11,16 +11,23 @@ export function runHealer(creep: Creep): void {
         creep.heal(creep);
     }
 
-    const combatState = Memory.combatState ?? 'RALLY';
+    const homeMemory  = creep.memory.homeRoom ? Game.rooms[creep.memory.homeRoom]?.memory : undefined;
+    const combatState = homeMemory?.combatState ?? 'RALLY';
 
     if (combatState === 'RALLY') {
+        if (creep.memory.defendingRoom) {
+            const target = creep.memory.defendingRoom;
+            if (creep.room.name !== target) { moveToRoom(creep, target); return; }
+            healPlatoon(creep);
+            return;
+        }
         rallyAtSpawn(creep);
         return;
     }
 
     // MARCH or ENGAGE — follow the platoon's assigned route
-    const pid    = creep.memory.platoonId;
-    const orders = pid ? Memory.platoonOrders?.[pid] as any : undefined;
+    const pid        = creep.memory.platoonId;
+    const orders     = pid ? homeMemory?.platoonOrders?.[pid] as any : undefined;
     const targetRoom = creep.memory.targetRoomName;
 
     // MAIN tactic: hold home until the feint platoon has drawn fire
@@ -135,17 +142,15 @@ function stagingArea(room: Room, spawn: StructureSpawn): RoomPosition {
 }
 
 function isHome(creep: Creep): boolean {
+    const home = creep.memory.homeRoom;
+    if (home) return creep.room.name === home;
     return !!Game.rooms[creep.room.name]?.controller?.my;
 }
 
 function travelHome(creep: Creep): void {
-    const homeRoom = Object.keys(Game.rooms).find(r => Game.rooms[r].controller?.my);
-    if (!homeRoom) return;
-    const exitDir = creep.room.findExitTo(homeRoom);
-    if (exitDir !== ERR_NO_PATH && exitDir !== ERR_INVALID_ARGS) {
-        const exit = creep.pos.findClosestByRange(exitDir);
-        if (exit) creep.moveTo(exit, { reusePath: 3 });
-    }
+    const dest = creep.memory.homeRoom ??
+        Object.keys(Game.rooms).find(r => Game.rooms[r]?.controller?.my);
+    if (dest) moveToRoom(creep, dest);
 }
 
 function moveToRoom(creep: Creep, roomName: string): void {
