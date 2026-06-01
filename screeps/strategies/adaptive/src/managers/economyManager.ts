@@ -35,20 +35,20 @@ export interface EnergyStatus {
 export function trackEnergyFlow(room: Room): void {
     if (Game.time % SAMPLE_INTERVAL !== 0) return;
 
-    if (!Memory.energyHistory) Memory.energyHistory = [];
-    Memory.energyHistory.push({
+    if (!room.memory.energyHistory) room.memory.energyHistory = [];
+    room.memory.energyHistory.push({
         tick:              Game.time,
         avail:             room.energyAvailable,
         containerFillPct:  sampleContainerFillPct(room),
         sourceDepletedPct: sampleSourceDepletedPct(room),
     });
-    if (Memory.energyHistory.length > WINDOW_SIZE) {
-        Memory.energyHistory = Memory.energyHistory.slice(-WINDOW_SIZE);
+    if (room.memory.energyHistory.length > WINDOW_SIZE) {
+        room.memory.energyHistory = room.memory.energyHistory.slice(-WINDOW_SIZE);
     }
 
     const status = computeStatus(room);
-    status.bottleneck = detectBottleneck(status);
-    Memory.energyStatus = status;
+    status.bottleneck = detectBottleneck(status, room);
+    room.memory.energyStatus = status;
 }
 
 function sampleContainerFillPct(room: Room): number {
@@ -71,7 +71,7 @@ function sampleSourceDepletedPct(room: Room): number {
 }
 
 function computeStatus(room: Room): EnergyStatus {
-    const h   = Memory.energyHistory ?? [];
+    const h   = room.memory.energyHistory ?? [];
     const cap = room.energyCapacityAvailable || 1;
     const pct = Math.round(room.energyAvailable / cap * 100);
 
@@ -106,8 +106,8 @@ function computeStatus(room: Room): EnergyStatus {
 
 // ─── Bottleneck detection ─────────────────────────────────────────────────────
 
-function detectBottleneck(status: EnergyStatus): Bottleneck {
-    const h = (Memory.energyHistory ?? []).slice(-8);
+function detectBottleneck(status: EnergyStatus, room: Room): Bottleneck {
+    const h = (room.memory.energyHistory ?? []).slice(-8);
     if (h.length < 4) return 'BALANCED';
 
     const avgCont = avgField(h, 'containerFillPct',  50);
@@ -149,8 +149,8 @@ export function calcDynamicTargets(room: Room): DynamicTargets {
         filter: s => s.structureType === STRUCTURE_CONTAINER,
     }).length ?? 0) > 0;
 
-    const bottleneck       = Memory.energyStatus?.bottleneck ?? 'BALANCED';
-    const h                = (Memory.energyHistory ?? []).slice(-8);
+    const bottleneck       = room.memory.energyStatus?.bottleneck ?? 'BALANCED';
+    const h                = (room.memory.energyHistory ?? []).slice(-8);
     const avgContainerFill = avgField(h, 'containerFillPct', 50);
 
     // ── Harvesters ────────────────────────────────────────────────────────────
@@ -171,13 +171,14 @@ export function calcDynamicTargets(room: Room): DynamicTargets {
 
     // ── Builders ──────────────────────────────────────────────────────────────
     // Gate builder count on container fill: spawning idle builders wastes capacity.
-    // When containers === 0, allow 1 builder to build the first containers (bootstrap).
-    // Once containers exist, scale with sites but throttle if containers are low.
+    // sourceCntrs === 0 is the right bootstrap signal — no source has a container yet,
+    // so no supply chain exists. Allow 1 builder to build those first containers.
+    // Once any source container exists, scale with sites but throttle if fill is low.
     let builder: number;
     if (sites === 0) {
         builder = 0;
-    } else if (containers === 0) {
-        builder = 1; // bootstrap: build the first containers before scaling up
+    } else if (sourceCntrs === 0) {
+        builder = 1; // bootstrap: at least 1 builder until the supply chain exists
     } else {
         const baseBuilders = sites <= 5 ? 1 : sites <= 15 ? 2 : sites <= 30 ? 3 : 4;
         // Containers below 25% → builders will idle; cap to 1 until supply recovers

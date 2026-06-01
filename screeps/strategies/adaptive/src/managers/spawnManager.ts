@@ -23,7 +23,7 @@ export function manageSpawns(room: Room): void {
     const phase   = Memory.phase ?? 'ECONOMY';
     const creeps  = room.find(FIND_MY_CREEPS);
     const counts  = countByRole(creeps);
-    const status  = Memory.energyStatus ?? { netRate: 0, trend: 0, pct: 50, level: 'STABLE' as EnergyLevel };
+    const status  = room.memory.energyStatus ?? { netRate: 0, trend: 0, pct: 50, level: 'STABLE' as EnergyLevel, bottleneck: 'BALANCED' as const };
 
     // Dynamic economy targets based on actual room state
     const eco = calcDynamicTargets(room);
@@ -113,7 +113,7 @@ export function pruneExcessCreeps(room: Room): void {
     const creeps   = room.find(FIND_MY_CREEPS);
     const counts   = countByRole(creeps);
     const phaseAge = Memory.phaseTick ? Game.time - Memory.phaseTick : 0;
-    const status   = Memory.energyStatus;
+    const status   = room.memory.energyStatus;
 
     // Suicide combat units after sustained ECONOMY (they're RUSH leftovers)
     if (phase === 'ECONOMY' && phaseAge > 500) {

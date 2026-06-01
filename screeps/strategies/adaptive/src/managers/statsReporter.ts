@@ -65,7 +65,7 @@ export function reportStats(room: Room): void {
             ramparts:   { ...sc(STRUCTURE_RAMPART), min_hits: rampartMin },
         },
         sites_total: room.find(FIND_CONSTRUCTION_SITES).length,
-        economy: Memory.energyStatus ?? null,
+        economy: room.memory.energyStatus ?? null,
         combat: { state: Memory.combatState ?? 'RALLY', warriors: roles['warrior'] ?? 0, rangers: roles['ranger'] ?? 0, healers: roles['healer'] ?? 0, target: Memory.enemyRoomName ?? null, tactics: Memory.platoonOrders ?? null },
         intel,
         log_entries: Memory.statsLog?.length ?? 0,
