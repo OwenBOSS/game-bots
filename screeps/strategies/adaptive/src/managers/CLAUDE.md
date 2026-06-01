@@ -1,24 +1,25 @@
 # managers/
 
-Stateless tick-functions called once per owned room per loop. Execution order is defined in `main.ts:37-46`.
+Stateless tick-functions called once per owned room per loop. Execution order is defined in `main.ts:37-48`.
 
 ## Manager Quick Reference
 
 | File | Export | Line | Responsibility |
 |------|--------|------|----------------|
-| `strategyManager.ts` | `updatePhase(room)` | 10 | Offense phase FSM: ECONOMY→ASSESS→RUSH/DEFEND→ECONOMY |
+| `strategyManager.ts` | `updatePhase(room)` | 10 | Per-room offense FSM: ECONOMY→ASSESS→RUSH/DEFEND→ECONOMY |
 | `economyManager.ts` | `trackEnergyFlow(room)` | 35 | Sample energy/containers/sources every 5t → `room.memory.energyStatus` |
 | `economyManager.ts` | `calcDynamicTargets(room)` | 141 | Return spawn targets adjusted for active bottleneck |
 | `defenseManager.ts` | `manageDefense(room)` | 19 | Threat detection (WARNING/ACTIVE) + cross-room unit dispatch |
 | `constructionManager.ts` | `manageConstruction(room)` | 3 | Road drip-feed (max 10 pending), containers, extensions, towers, ramparts |
 | `spawnManager.ts` | `manageSpawns(room)` | 18 | Priority-ordered spawn queue; local defense boost if room is ACTIVE |
 | `spawnManager.ts` | `pruneExcessCreeps(room)` | 123 | Cull CRITICAL-energy bloat; kill combat units in sustained ECONOMY |
-| `combatManager.ts` | `manageCombat(room)` | 13 | Towers → safe mode → RALLY/MARCH/ENGAGE state transitions |
-| `tacticsManager.ts` | `manageTactics()` | 20 | Assign platoon orders (DIRECT/FLANK/FEINT/MAIN) on MARCH begin |
+| `combatManager.ts` | `manageCombat(room)` | 14 | Towers → safe mode → per-room RALLY/MARCH/ENGAGE state transitions |
+| `tacticsManager.ts` | `manageTactics(room)` | 29 | Assign platoon orders (DIRECT/FLANK/FEINT/MAIN) on MARCH begin |
 | `expansionManager.ts` | `manageExpansion(mainRoom)` | 14 | IDLE→CLAIMING→BOOTSTRAPPING→ACTIVE expansion FSM |
 | `expansionManager.ts` | `bootstrapTargets()` | 89 | Returns `{hauler, builder}` counts needed in new room |
 | `linkManager.ts` | `manageLinkTransfers(room)` | 6 | Drain source links → hub link each tick |
 | `marketManager.ts` | `manageMarket(room)` | 10 | Buy ghodium (`GHODIUM_TARGET=1000`) every 200t at RCL 6+ |
+| `transferManager.ts` | `manageTransfers(room)` | 21 | Inter-room energy balance; terminal.send() at RCL 6+ |
 | `statsReporter.ts` | `reportStats(room)` | 14 | Console log every 50t; `Memory.statsLog` snapshot every 200t |
 
 ## Key Types (economyManager.ts)
@@ -32,7 +33,7 @@ type Bottleneck  = 'HARVESTER_SHORTAGE' | 'HAULER_SHORTAGE' | 'SOURCE_MAXED' | '
 interface EnergyStatus { netRate, trend, pct, level: EnergyLevel, bottleneck: Bottleneck }
 
 // :132
-interface DynamicTargets { harvester, hauler, upgrader, builder, repairer, scout }
+interface DynamicTargets { harvester, hauler, upgrader, builder, repairer, scout, scavenger }
 ```
 
 Bottleneck detection reads `room.memory.energyHistory` (last 8 samples = 40 ticks):
@@ -44,17 +45,8 @@ Bottleneck detection reads `room.memory.energyHistory` (last 8 samples = 40 tick
 
 | Key | Owner (primary writer) | Notes |
 |-----|----------------------|-------|
-| `Memory.phase` | `strategyManager.ts:10` | `GamePhase` enum |
-| `Memory.phaseTick` | `strategyManager.ts` | tick of last phase change |
-| `Memory.scoutTick` | `scout.ts` (set) / `strategyManager` (clear) | tick of last scout completion |
-| `Memory.combatState` | `combatManager.ts` | `CombatState`: RALLY/MARCH/ENGAGE |
-| `Memory.rallyTick` | `combatManager.ts` | tick MARCH began |
-| `Memory.enemyRoomName` | `scout.ts` (set) / `strategyManager` (clear) | primary offensive target |
-| `Memory.enemyStrength` | `scout.ts` | strength score of primary target |
 | `Memory.roomIntel` | `scout.ts` | `Record<string, RoomIntel>` — all scanned rooms |
 | `Memory.roomThreats` | `defenseManager.ts:19` | `Record<string, RoomThreat>` — OUR rooms under threat |
-| `Memory.platoonOrders` | `tacticsManager.ts` | `Record<platoonId, PlatoonOrder>` |
-| `Memory.coordinatedAttackTick` | `tacticsManager.ts` | tick coordinated attack began |
 | `Memory.roadsPlanned` | `constructionManager.ts` | flag: roads already planned for current RCL |
 | `Memory.lastRCL` | `constructionManager.ts` | detect RCL changes to re-plan |
 | `Memory.expansionState` | `expansionManager.ts` | `ExpansionState` enum |
@@ -64,10 +56,22 @@ Bottleneck detection reads `room.memory.energyHistory` (last 8 samples = 40 tick
 
 ## Per-Room Memory (`room.memory.*`)
 
+All offense state is now per-room so each owned room can independently be in RUSH, DEFEND, ECONOMY, etc.
+
 | Key | Owner | Contents |
 |-----|-------|----------|
 | `energyHistory` | `economyManager.ts:38` | last 20 samples `{tick, avail, containerFillPct, sourceDepletedPct}` |
 | `energyStatus` | `economyManager.ts:51` | `EnergyStatus` incl. `bottleneck` — recomputed every 5 ticks |
+| `phase` | `strategyManager.ts:10` | `GamePhase` — ECONOMY/ASSESS/RUSH/DEFEND |
+| `phaseTick` | `strategyManager.ts` | tick of last phase change (used for cooldowns + timeouts) |
+| `scoutTick` | `scout.ts` (set all rooms) | tick scout completed intel on target room |
+| `combatState` | `combatManager.ts` | `CombatState`: RALLY/MARCH/ENGAGE |
+| `rallyTick` | `combatManager.ts` | tick MARCH began (reassess interval) |
+| `enemyRoomName` | `scout.ts` (set) / `strategyManager` (clear) | current offensive target |
+| `enemyStrength` | `scout.ts` (set) / `strategyManager` (clear) | strength score of that target |
+| `platoonOrders` | `tacticsManager.ts` | `Record<platoonId, PlatoonOrder>` — per this room |
+| `coordinatedAttackTick` | `tacticsManager.ts` | tick coordinated attack began |
+| `energySurplus` | `transferManager.ts` | excess energy above threshold this room can donate |
 
 ## Key Constants
 
@@ -93,6 +97,9 @@ Bottleneck detection reads `room.memory.energyHistory` (last 8 samples = 40 tick
 | `MAX_ROAD_SITES` | 10 | constructionManager.ts:1 |
 | `MIN_RCL_TO_EXPAND` | 4 | expansionManager.ts:10 |
 | `BOOTSTRAP_HAULERS/BUILDERS` | 2 each | expansionManager.ts:11-12 |
+| `SURPLUS_THRESHOLD` | 100,000e | transferManager.ts:10 |
+| `DEFICIT_THRESHOLD` | 10,000e | transferManager.ts:11 |
+| `TERMINAL_RCL` | 6 | transferManager.ts:12 |
 | `REPORT_INTERVAL` | 50t | statsReporter.ts:10 |
 | `LOG_INTERVAL` | 200t | statsReporter.ts:11 |
 
@@ -101,9 +108,10 @@ Bottleneck detection reads `room.memory.energyHistory` (last 8 samples = 40 tick
 2. Emergency upgrader (controller downgrade < 4000t)
 3. Harvester floor (count < 2, always spawns)
 4. **Local defense boost** (room has ACTIVE threat): repairer×2, warrior×4, ranger×2, healer×1
-5. Economy roles (if not CRITICAL): harvester, builder, hauler, upgrader, scout
-6. Phase repairer (DEFEND phase)
-7. Combat units (STABLE/SURPLUS energy): warrior → ranger → healer
+5. Economy roles (if not CRITICAL): harvester, builder, hauler, upgrader, scout, scavenger
+6. Courier (if surplus energy AND deficit neighbor room exists): up to 2 per route
+7. Repairer (phase-gated: DEFEND)
+8. Combat units (STABLE/SURPLUS energy): warrior → ranger → healer
 
 ## Defense Flow (`defenseManager.ts`)
 ```
@@ -115,11 +123,19 @@ dispatchAndRecall()       → ACTIVE threats: redirect RALLY-state units from sa
 Units are only dispatched if:
 - Their `homeRoom` is NOT itself under ACTIVE threat
 - They are physically in their `homeRoom`
-- `Memory.combatState === 'RALLY'` (not on active offense)
+- `room.memory.combatState === 'RALLY'` (their home room is not on active offense)
+
+## Inter-Room Energy Flow (`transferManager.ts`)
+- Each tick: compute `room.memory.energySurplus` (storage above 100k)
+- Pre-RCL6: `spawnManager` spawns couriers when neighbor is in deficit (<10k storage)
+- RCL6+: `manageTerminalTransfers()` sends 5k energy per call via terminal (500t cooldown)
+- Couriers: `homeRoom` = source, `courierTarget` = destination
 
 ## Gotchas
+- Per-room offense: `room.memory.combatState` is independent per room. Room A can be MARCH while room B is ECONOMY. Combat creeps always read from `Game.rooms[creep.memory.homeRoom].memory.combatState`.
 - `constructionManager` skips re-planning if `roadsPlanned && lastRCL === rcl` — change `Memory.roadsPlanned = false` to force a re-plan.
 - `spawnManager` counts creeps via `room.find(FIND_MY_CREEPS)` — bootstrap workers in remote rooms count against main room targets.
 - `defenseManager.dispatchAndRecall` iterates all `Game.creeps` globally and is called once per owned room — it's idempotent (already-dispatched creeps are skipped).
-- `tacticsManager` only fires on MARCH start; platoon orders persist in Memory until overwritten.
+- `tacticsManager` now takes a `room` argument and only plans for platoons homed in that room.
 - `calcDynamicTargets` reads `room.memory.energyStatus` (written 5t ago) — there's a 1-sample lag on bottleneck response.
+- Scavenger: spawned by dynamic targets (1 when containers > 0). Assign `creep.memory.scavengeRoom` manually in console to send it cross-room.
