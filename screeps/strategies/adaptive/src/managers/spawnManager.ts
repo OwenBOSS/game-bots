@@ -57,6 +57,18 @@ export function manageSpawns(room: Room): void {
         return;
     }
 
+    // ── Local defense: room under active attack → spawn defenders before eco ─
+    const localThreat = Memory.roomThreats?.[room.name]?.severity === 'ACTIVE';
+    if (localThreat && !inSafeMode && room.energyAvailable >= MIN_COMBAT_ENERGY) {
+        if ((counts.repairer ?? 0) < 2) { trySpawn(spawn, 'repairer', room.energyAvailable); return; }
+        if ((counts.warrior  ?? 0) < 4) { trySpawn(spawn, 'warrior',  room.energyAvailable, { platoonId: assignWarriorPlatoon(creeps) }); return; }
+        if ((counts.ranger   ?? 0) < 2) { trySpawn(spawn, 'ranger',   room.energyAvailable, { platoonId: assignWarriorPlatoon(creeps) }); return; }
+        if ((counts.healer   ?? 0) < 1) {
+            const pid = assignHealerPlatoon(creeps);
+            if (pid) { trySpawn(spawn, 'healer', room.energyAvailable, { platoonId: pid }); return; }
+        }
+    }
+
     // ── Economy roles — respect energy level ─────────────────────────────────
     // In DEFICIT/CRITICAL don't spawn new haulers/upgraders (save energy for harvesters)
     const canSpawnEconomy = status.level !== 'CRITICAL';
@@ -199,7 +211,7 @@ function trySpawn(
 
     const name   = `${role}_${Game.time}`;
     const result = spawn.spawnCreep(body, name, {
-        memory: { role, working: false, ...extraMemory } as CreepMemory,
+        memory: { role, working: false, homeRoom: spawn.room.name, ...extraMemory } as CreepMemory,
     });
     if (result === OK) {
         const cost    = body.reduce((s, p) => s + BODYPART_COST[p], 0);

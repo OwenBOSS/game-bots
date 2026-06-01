@@ -28,13 +28,24 @@ declare global {
         sourceCount: number;
     }
 
+    interface RoomThreat {
+        detectedAt:   number;  // tick when first detected
+        lastSeenAt:   number;  // most recent confirmation tick
+        hostileCount: number;
+        strength:     number;  // sum of threat scores across all dangerous hostiles
+        severity:     'WARNING' | 'ACTIVE';
+        fromRoom?:    string;  // adjacent room where scouts first saw the threat approaching
+    }
+
     interface CreepMemory {
         role: CreepRole;
         working: boolean;
         targetRoomName?: string;
         scoutComplete?: boolean;
-        sourceId?: Id<Source>;  // harvesters: assigned source
-        platoonId?: string;     // warriors/rangers: rally group id
+        sourceId?: Id<Source>;   // harvesters: assigned source
+        platoonId?: string;      // warriors/rangers: rally group id
+        homeRoom?: string;       // room this creep was spawned in; used for retreat and dispatch recall
+        defendingRoom?: string;  // set by defenseManager when this unit is dispatched to a remote room
     }
 
     // Per-room economy tracking (stored on room.memory so multi-room setups don't clobber each other)
@@ -65,6 +76,8 @@ declare global {
         // Tactics
         platoonOrders?: Record<string, import('../types').PlatoonOrder>;
         coordinatedAttackTick?: number;
+        // Per-room threat registry — key is the name of OUR room being threatened
+        roomThreats?: Record<string, RoomThreat>;
         // Expansion
         expansionState?: ExpansionState;
         expansionTarget?: string;

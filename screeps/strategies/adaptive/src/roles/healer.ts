@@ -14,6 +14,13 @@ export function runHealer(creep: Creep): void {
     const combatState = Memory.combatState ?? 'RALLY';
 
     if (combatState === 'RALLY') {
+        // Defense dispatch: travel to assigned room and heal fighters there
+        if (creep.memory.defendingRoom) {
+            const target = creep.memory.defendingRoom;
+            if (creep.room.name !== target) { moveToRoom(creep, target); return; }
+            healPlatoon(creep);
+            return;
+        }
         rallyAtSpawn(creep);
         return;
     }
@@ -135,17 +142,15 @@ function stagingArea(room: Room, spawn: StructureSpawn): RoomPosition {
 }
 
 function isHome(creep: Creep): boolean {
+    const home = creep.memory.homeRoom;
+    if (home) return creep.room.name === home;
     return !!Game.rooms[creep.room.name]?.controller?.my;
 }
 
 function travelHome(creep: Creep): void {
-    const homeRoom = Object.keys(Game.rooms).find(r => Game.rooms[r].controller?.my);
-    if (!homeRoom) return;
-    const exitDir = creep.room.findExitTo(homeRoom);
-    if (exitDir !== ERR_NO_PATH && exitDir !== ERR_INVALID_ARGS) {
-        const exit = creep.pos.findClosestByRange(exitDir);
-        if (exit) creep.moveTo(exit, { reusePath: 3 });
-    }
+    const dest = creep.memory.homeRoom ??
+        Object.keys(Game.rooms).find(r => Game.rooms[r]?.controller?.my);
+    if (dest) moveToRoom(creep, dest);
 }
 
 function moveToRoom(creep: Creep, roomName: string): void {

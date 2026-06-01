@@ -14,6 +14,7 @@ import { manageConstruction } from './managers/constructionManager';
 import { manageCombat }       from './managers/combatManager';
 import { manageExpansion }    from './managers/expansionManager';
 import { trackEnergyFlow }   from './managers/economyManager';
+import { manageDefense }     from './managers/defenseManager';
 import { manageLinkTransfers } from './managers/linkManager';
 import { manageMarket }       from './managers/marketManager';
 import { reportStats }        from './managers/statsReporter';
@@ -35,6 +36,7 @@ export function loop(): void {
         if (!room.controller?.my) continue;
 
         trackEnergyFlow(room);
+        manageDefense(room);
         updatePhase(room);
         manageConstruction(room);
         manageSpawns(room);
