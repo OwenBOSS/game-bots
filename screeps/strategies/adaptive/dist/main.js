@@ -299,6 +299,15 @@ function deliver$1(creep) {
         if (creep.transfer(target, RESOURCE_ENERGY) === ERR_NOT_IN_RANGE) {
             creep.moveTo(target, { reusePath: 5 });
         }
+        return;
+    }
+    // Nothing needs energy — fill the hub container (non-source container near spawn)
+    // so builders always have a local pickup point when storage doesn't exist yet.
+    const hub = findHubContainer(creep.room);
+    if (hub) {
+        if (creep.transfer(hub, RESOURCE_ENERGY) === ERR_NOT_IN_RANGE) {
+            creep.moveTo(hub, { reusePath: 5 });
+        }
     }
 }
 function needsEnergy(s) {
@@ -346,6 +355,26 @@ function getCachedSourceContainer(creep) {
 }
 function isAdjacentToSource(container, room) {
     return room.find(FIND_SOURCES).some(src => src.pos.isNearTo(container.pos));
+}
+// Returns the non-source container closest to spawn — the hub buffer for builders.
+function findHubContainer(room) {
+    const sources = room.find(FIND_SOURCES);
+    const containers = room.find(FIND_STRUCTURES, {
+        filter: s => {
+            if (s.structureType !== STRUCTURE_CONTAINER)
+                return false;
+            const c = s;
+            if (c.store.getFreeCapacity(RESOURCE_ENERGY) <= 0)
+                return false;
+            return !sources.some(src => src.pos.isNearTo(c.pos));
+        },
+    });
+    if (containers.length === 0)
+        return null;
+    const spawn = room.find(FIND_MY_SPAWNS)[0];
+    if (!spawn)
+        return containers[0];
+    return containers.reduce((best, c) => c.pos.getRangeTo(spawn) < best.pos.getRangeTo(spawn) ? c : best);
 }
 function getCachedContainer(creep, inRoom) {
     if (creep.room.name !== inRoom)
@@ -2300,8 +2329,6 @@ function calcDynamicTargets(room) {
         const roundTrip = dist * 2;
         baseHaulers += Math.max(1, Math.ceil(10 * roundTrip / haulerCarry));
     }
-    if (hasControllerContainer)
-        baseHaulers += 1;
     const haulerRaw = bottleneck === 'HAULER_SHORTAGE'
         ? baseHaulers + sourceCntrs
         : baseHaulers;
@@ -2885,9 +2912,11 @@ function maintainRoadQueue(room) {
 }
 // ─── Containers ──────────────────────────────────────────────────────────────
 function placeContainers(room) {
+    const spawn = room.find(FIND_MY_SPAWNS)[0];
     const targets = [
         ...room.find(FIND_SOURCES).map(s => s.pos),
         ...(room.controller ? [room.controller.pos] : []),
+        ...(spawn ? [spawn.pos] : []), // hub container near spawn — pre-RCL4 buffer
     ];
     for (const pos of targets) {
         const hasNearby = pos.findInRange(FIND_STRUCTURES, 1, { filter: s => s.structureType === STRUCTURE_CONTAINER }).length > 0 ||
@@ -3869,7 +3898,7 @@ function bestHaulerCarry(energyCap) {
 }
 
 // Updated automatically by `just deploy` — do not edit manually
-const REGIME = '2026-06-02-bcf2862';
+const REGIME = '2026-06-02-632898f';
 
 const REPORT_INTERVAL = 50;
 const LOG_INTERVAL = 200;

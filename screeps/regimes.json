@@ -19,5 +19,12 @@
     "description": "",
     "deployedAt": "2026-06-02T15:02:55.867Z",
     "gitHash": "bcf2862"
+  },
+  {
+    "name": "2026-06-02-632898f",
+    "strategy": "adaptive",
+    "description": "",
+    "deployedAt": "2026-06-02T15:43:56.047Z",
+    "gitHash": "632898f"
   }
 ]

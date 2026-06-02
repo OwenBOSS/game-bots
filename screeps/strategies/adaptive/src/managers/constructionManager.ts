@@ -124,9 +124,11 @@ function maintainRoadQueue(room: Room): void {
 // ─── Containers ──────────────────────────────────────────────────────────────
 
 function placeContainers(room: Room): void {
+    const spawn = room.find(FIND_MY_SPAWNS)[0];
     const targets: RoomPosition[] = [
         ...room.find(FIND_SOURCES).map(s => s.pos),
         ...(room.controller ? [room.controller.pos] : []),
+        ...(spawn ? [spawn.pos] : []),  // hub container near spawn — pre-RCL4 buffer
     ];
     for (const pos of targets) {
         const hasNearby =

@@ -225,7 +225,6 @@ export function calcDynamicTargets(room: Room): DynamicTargets {
         const roundTrip = dist * 2;
         baseHaulers += Math.max(1, Math.ceil(10 * roundTrip / haulerCarry));
     }
-    if (hasControllerContainer) baseHaulers += 1;
 
     const haulerRaw = bottleneck === 'HAULER_SHORTAGE'
         ? baseHaulers + sourceCntrs
