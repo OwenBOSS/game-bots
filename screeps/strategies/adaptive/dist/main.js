@@ -3784,7 +3784,7 @@ function bestHaulerCarry(energyCap) {
 }
 
 // Updated automatically by `just deploy` — do not edit manually
-const REGIME = '2026-06-02-8c691c5';
+const REGIME = '2026-06-02-7ea6d25';
 
 const REPORT_INTERVAL = 50;
 const LOG_INTERVAL = 200;
