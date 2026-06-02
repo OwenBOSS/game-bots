@@ -1,7 +1,7 @@
 // Builder works through construction sites in explicit priority order so the most
 // impactful structures are finished first regardless of physical proximity.
 //
-// Priority: containers → extensions → towers → ramparts → roads → repair → upgrade
+// Priority: storage → containers → extensions → towers → ramparts → roads → repair → upgrade
 
 export function runBuilder(creep: Creep): void {
     if (creep.memory.working && creep.store[RESOURCE_ENERGY] === 0) {
@@ -112,11 +112,12 @@ function findBuildTarget(creep: Creep): ConstructionSite | null {
 
     // 2. Everything else in priority order
     const PRIORITY: StructureConstant[] = [
+        STRUCTURE_STORAGE,
         STRUCTURE_CONTAINER,   // controller container and any remaining
-        STRUCTURE_ROAD,
         STRUCTURE_EXTENSION,
         STRUCTURE_TOWER,
         STRUCTURE_RAMPART,
+        STRUCTURE_ROAD,
     ];
     for (const type of PRIORITY) {
         const site = creep.pos.findClosestByPath(FIND_CONSTRUCTION_SITES, {

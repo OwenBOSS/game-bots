@@ -68,6 +68,21 @@ Memory.statsLog.map(s => [s.tick, s.phase, s.combat.state])
 Memory.statsLog.map(s => [s.tick, s.structs])
 ```
 
+## Room Layout Snapshot
+
+Captures structure positions + ASCII map for all owned rooms into `Memory.roomLayout`.
+Auto-written every 1000 ticks by `statsReporter.ts`. To capture immediately:
+
+```js
+Memory.captureLayout = true
+```
+
+The bot captures on the next tick, then run `just fetch-stats` to pull it into `dashboard/data/room-layout.json`.
+
+ASCII legend: `O`=spawn `S`=source `C`=controller `T`=tower `K`=storage `L`=link `e`=extension `c`=container `r`=road `*`=site `#`=wall `~`=swamp
+
+---
+
 ## Utility / Control Commands
 
 ```js

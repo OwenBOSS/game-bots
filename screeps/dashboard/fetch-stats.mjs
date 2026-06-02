@@ -14,10 +14,11 @@ import { runSim } from '../sim/run.mjs';
 import { recordPrediction, resolvePredictions, predictionAccuracyReport } from '../sim/calibrate.mjs';
 import { uploadSimOutput } from '../sim/upload.mjs';
 
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const DATA_DIR   = join(__dirname, 'data');
-const HISTORY    = join(DATA_DIR, 'history.json');
-const DASHBOARD  = join(__dirname, 'index.html');
+const __dirname   = dirname(fileURLToPath(import.meta.url));
+const DATA_DIR    = join(__dirname, 'data');
+const HISTORY     = join(DATA_DIR, 'history.json');
+const ROOM_LAYOUT = join(DATA_DIR, 'room-layout.json');
+const DASHBOARD   = join(__dirname, 'index.html');
 const TOKEN      = process.env.SCREEPS_TOKEN;
 const SHARD      = process.env.SCREEPS_SHARD ?? 'shard3';
 
@@ -67,6 +68,17 @@ history = [...history, ...fresh].sort((a, b) => a.tick - b.tick);
 writeFileSync(HISTORY, JSON.stringify(history, null, 2));
 console.log(`+${fresh.length} new snapshots — total: ${history.length}`);
 
+// ── Fetch room layout ───────────────────────────────────────────────────────
+console.log('Fetching Memory.roomLayout...');
+let roomLayout = null;
+try { roomLayout = await fetchMemoryPath('roomLayout'); } catch (err) { console.warn('Room layout fetch skipped:', err.message); }
+if (roomLayout && typeof roomLayout === 'object' && Object.keys(roomLayout).length > 0) {
+  writeFileSync(ROOM_LAYOUT, JSON.stringify(roomLayout, null, 2));
+  console.log(`Room layout saved: ${Object.keys(roomLayout).join(', ')} → data/room-layout.json`);
+} else {
+  console.log('Room layout not yet in Memory — deploy bot and wait ~1000 ticks');
+}
+
 // ── Run Monte Carlo simulation ──────────────────────────────────────────────
 console.log('Running Monte Carlo simulation (200 runs × 4 strategies)...');
 let simData = null;
@@ -89,14 +101,14 @@ await uploadSimOutput(simData, { token: TOKEN, shard: SHARD });
 
 // ── Regenerate dashboard ────────────────────────────────────────────────────
 const accuracy = predictionAccuracyReport();
-writeFileSync(DASHBOARD, buildDashboard(history, simData, accuracy));
+writeFileSync(DASHBOARD, buildDashboard(history, simData, accuracy, roomLayout));
 console.log(`Dashboard: open screeps/dashboard/index.html in your browser`);
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Dashboard HTML generator — data embedded in-page, no server required
 // ═══════════════════════════════════════════════════════════════════════════
 
-function buildDashboard(snapshots, simData = null, accuracy = null) {
+function buildDashboard(snapshots, simData = null, accuracy = null, roomLayout = null) {
   const latest   = snapshots.at(-1) ?? {};
   const firstTick = snapshots[0]?.tick ?? 0;
   const lastTick  = snapshots.at(-1)?.tick ?? 0;
@@ -127,11 +139,12 @@ function buildDashboard(snapshots, simData = null, accuracy = null) {
     `<div class="kpi"><div class="val">${k.val}</div><div class="lbl">${k.lbl}</div></div>`
   ).join('');
 
-  const dataJson   = JSON.stringify(snapshots);
-  const roleColors = JSON.stringify(ROLE_COLORS);
-  const roleList   = JSON.stringify(allRoles);
-  const simJson    = JSON.stringify(simData);
+  const dataJson    = JSON.stringify(snapshots);
+  const roleColors  = JSON.stringify(ROLE_COLORS);
+  const roleList    = JSON.stringify(allRoles);
+  const simJson     = JSON.stringify(simData);
   const accuracyJson = JSON.stringify(accuracy);
+  const layoutJson  = JSON.stringify(roomLayout);
 
   // ── Simulation section HTML ─────────────────────────────────────────────
   const simRunInfo = simData
@@ -299,6 +312,7 @@ canvas{width:100%!important;max-height:230px}
   <div class="card"><h2>Economy Bottleneck</h2><canvas id="cBottleneck"></canvas></div>
   <div class="card" style="grid-column:1/-1"><h2>Regime History</h2><div id="regimeHistory"></div></div>
   ${calCard}
+  <div class="card" style="grid-column:1/-1"><h2>Room Layout</h2><div id="roomLayouts"></div></div>
 
   <!-- ── Simulation Projection ─────────────────────────────────────── -->
   <div class="section-header">
@@ -314,6 +328,45 @@ const ROLE_COLORS = ${roleColors};
 const ALL_ROLES   = ${roleList};
 const SIM         = ${simJson};
 const ACCURACY    = ${accuracyJson};
+const LAYOUT      = ${layoutJson};
+
+// ── Room layout maps ────────────────────────────────────────────────────────
+{
+  const CH_COLOR = { '#':'#3a3a3a', '~':'#1a3a1a', '.':'#111', 'r':'#607d8b',
+    'c':'#795548', 'e':'#2196f3', 'L':'#00bcd4', 'K':'#9c27b0',
+    'T':'#f44336', 'C':'#ffd700', 'S':'#4caf50', 'O':'#58a6ff', '*':'#ff9800' };
+  const CH_LABEL = { '#':'wall','~':'swamp','.':'plain','r':'road','c':'container',
+    'e':'extension','L':'link','K':'storage','T':'tower','C':'controller','S':'source',
+    'O':'spawn','*':'site' };
+  const el = document.getElementById('roomLayouts');
+  if (!LAYOUT || !Object.keys(LAYOUT).length) {
+    el.innerHTML = '<p style="color:#8b949e;font-size:.8em">Not yet captured — deploy bot and wait ~1000 ticks, then run fetch-stats</p>';
+  } else {
+    el.innerHTML = Object.values(LAYOUT).map(room => {
+      const colored = room.ascii.split('\\n').map(line =>
+        line.split('').map(ch => '<span style="color:' + (CH_COLOR[ch] || '#c9d1d9') + '">' + ch + '</span>').join('')
+      ).join('\\n');
+      const legend = Object.entries(CH_LABEL).map(([ch, lbl]) =>
+        '<span style="color:' + (CH_COLOR[ch] || '#c9d1d9') + ';margin-right:12px">' + ch + ' ' + lbl + '</span>'
+      ).join('');
+      const counts = [
+        room.spawns.length + ' spawn',
+        room.sources.length + ' sources',
+        room.extensions.length + ' ext',
+        room.containers.length + ' containers',
+        room.towers.length + ' towers',
+        room.roads.length + ' roads',
+        room.sites.length + ' sites pending',
+      ].join(' · ');
+      return '<div style="margin-bottom:20px">' +
+        '<h3 style="color:#58a6ff;font-size:.85em;margin-bottom:4px">' + room.room + ' · RCL ' + room.rcl + ' · tick ' + room.tick.toLocaleString() + '</h3>' +
+        '<div style="font-size:.68em;color:#8b949e;margin-bottom:6px">' + counts + '</div>' +
+        '<div style="font-size:.65em;color:#8b949e;margin-bottom:6px;flex-wrap:wrap;display:flex;gap:4px">' + legend + '</div>' +
+        '<pre style="font-size:7.5px;line-height:1.15;font-family:monospace;background:#000;padding:8px;border-radius:4px;overflow:auto;display:inline-block">' + colored + '</pre>' +
+        '</div>';
+    }).join('');
+  }
+}
 
 if (!H.length) {
   document.body.insertAdjacentHTML('beforeend','<p class="empty">No data yet — run: just fetch-stats</p>');

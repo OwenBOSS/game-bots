@@ -99,6 +99,27 @@ declare global {
         };
     }
 
+    interface RoomLayout {
+        tick:        number;
+        room:        string;
+        rcl:         number;
+        sources:     Array<{ id: string; x: number; y: number }>;
+        controller:  { id: string; x: number; y: number } | null;
+        spawns:      Array<{ id: string; name: string; x: number; y: number }>;
+        extensions:  Array<{ x: number; y: number }>;
+        containers:  Array<{ x: number; y: number; energy: number; capacity: number }>;
+        storage:     { x: number; y: number; energy: number; capacity: number } | null;
+        towers:      Array<{ x: number; y: number; energy: number }>;
+        ramparts:    Array<{ x: number; y: number }>;
+        roads:       Array<{ x: number; y: number }>;
+        links:       Array<{ x: number; y: number }>;
+        sites:       Array<{ type: string; x: number; y: number; progress: number; total: number }>;
+        // 50×50 ASCII grid, rows joined with '\n'.
+        // Legend: O=spawn S=source C=controller T=tower K=storage L=link e=extension
+        //         c=container r=road *=site #=wall ~=swamp .=plain
+        ascii:       string;
+    }
+
     interface Memory {
         // Shared global intel — written by scout.ts, read by all rooms
         roomIntel: Record<string, RoomIntel>;
@@ -113,6 +134,11 @@ declare global {
         expansionRoomName?: string;
         // Analytics log — rolling history, dumpable via JSON.stringify(Memory.statsLog)
         statsLog?: StatSnapshot[];
+        // Room layout snapshots — updated every 1000t, keyed by room name
+        roomLayout?: Record<string, RoomLayout>;
+        // Set to true from console to force an immediate layout capture this tick
+        captureLayout?: boolean;
+        captureLayoutAt?: number;
     }
 
     interface StatSnapshot {

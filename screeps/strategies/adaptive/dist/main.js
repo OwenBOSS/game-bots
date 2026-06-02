@@ -481,7 +481,7 @@ function getEnergy$1(creep) {
 // Builder works through construction sites in explicit priority order so the most
 // impactful structures are finished first regardless of physical proximity.
 //
-// Priority: containers → extensions → towers → ramparts → roads → repair → upgrade
+// Priority: storage → containers → extensions → towers → ramparts → roads → repair → upgrade
 function runBuilder(creep) {
     if (creep.memory.working && creep.store[RESOURCE_ENERGY] === 0) {
         creep.memory.working = false;
@@ -581,11 +581,12 @@ function findBuildTarget(creep) {
     }
     // 2. Everything else in priority order
     const PRIORITY = [
+        STRUCTURE_STORAGE,
         STRUCTURE_CONTAINER, // controller container and any remaining
-        STRUCTURE_ROAD,
         STRUCTURE_EXTENSION,
         STRUCTURE_TOWER,
         STRUCTURE_RAMPART,
+        STRUCTURE_ROAD,
     ];
     for (const type of PRIORITY) {
         const site = creep.pos.findClosestByPath(FIND_CONSTRUCTION_SITES, {
@@ -2796,11 +2797,17 @@ function manageConstruction(room) {
     if (period(5, 'construction:prune'))
         pruneExcessRoadSites(room);
     maintainRoadQueue(room);
+    // Containers and storage are checked periodically — they can be destroyed
+    // mid-game and must be re-queued without waiting for an RCL change.
+    // Keys are room-scoped so multi-room setups don't share the same timer.
+    if (period(50, `construction:containers:${room.name}`))
+        placeContainers(room);
+    if (rcl >= 4 && period(50, `construction:storage:${room.name}`))
+        placeStorage(room);
     if (Memory.roadsPlanned && Memory.lastRCL === rcl)
         return;
     Memory.roadsPlanned = true;
     Memory.lastRCL = rcl;
-    placeContainers(room);
     if (rcl >= 2)
         placeExtensions(room, rcl);
     if (rcl >= 2)
@@ -2919,27 +2926,58 @@ function placeContainers(room) {
         ...(spawn ? [spawn.pos] : []), // hub container near spawn — pre-RCL4 buffer
     ];
     for (const pos of targets) {
-        const hasNearby = pos.findInRange(FIND_STRUCTURES, 1, { filter: s => s.structureType === STRUCTURE_CONTAINER }).length > 0 ||
-            pos.findInRange(FIND_CONSTRUCTION_SITES, 1, { filter: s => s.structureType === STRUCTURE_CONTAINER }).length > 0;
+        // Search range 2 so sources adjacent to spawn (or walls) still find a valid tile.
+        const SEARCH_RANGE = 2;
+        const hasNearby = pos.findInRange(FIND_STRUCTURES, SEARCH_RANGE, { filter: s => s.structureType === STRUCTURE_CONTAINER }).length > 0 ||
+            pos.findInRange(FIND_CONSTRUCTION_SITES, SEARCH_RANGE, { filter: s => s.structureType === STRUCTURE_CONTAINER }).length > 0;
         if (hasNearby)
             continue;
         let placed = false;
-        for (let dx = -1; dx <= 1 && !placed; dx++) {
-            for (let dy = -1; dy <= 1 && !placed; dy++) {
-                if (dx === 0 && dy === 0)
-                    continue;
-                const result = room.createConstructionSite(pos.x + dx, pos.y + dy, STRUCTURE_CONTAINER);
-                if (result === OK) {
-                    placed = true;
-                }
-                else if (result !== ERR_INVALID_TARGET && result !== ERR_FULL) {
-                    console.log(`[adaptive] Container placement err ${result} at (${pos.x + dx},${pos.y + dy})`);
+        outer: for (let r = 1; r <= SEARCH_RANGE && !placed; r++) {
+            for (let dx = -r; dx <= r && !placed; dx++) {
+                for (let dy = -r; dy <= r && !placed; dy++) {
+                    if (Math.abs(dx) !== r && Math.abs(dy) !== r)
+                        continue; // ring only
+                    const x = pos.x + dx, y = pos.y + dy;
+                    if (x < 1 || x > 48 || y < 1 || y > 48)
+                        continue;
+                    const result = room.createConstructionSite(x, y, STRUCTURE_CONTAINER);
+                    if (result === OK) {
+                        placed = true;
+                        break outer;
+                    }
                 }
             }
         }
         if (!placed)
             console.log(`[adaptive] Could not place container near (${pos.x},${pos.y})`);
     }
+}
+// ─── Storage (RCL 4+) ────────────────────────────────────────────────────────
+function placeStorage(room) {
+    if (room.storage)
+        return;
+    if (room.find(FIND_CONSTRUCTION_SITES, { filter: s => s.structureType === STRUCTURE_STORAGE }).length > 0)
+        return;
+    const spawn = room.find(FIND_MY_SPAWNS)[0];
+    if (!spawn)
+        return;
+    for (let r = 2; r <= 8; r++) {
+        for (let dx = -r; dx <= r; dx++) {
+            for (let dy = -r; dy <= r; dy++) {
+                if (Math.abs(dx) !== r && Math.abs(dy) !== r)
+                    continue;
+                const x = spawn.pos.x + dx, y = spawn.pos.y + dy;
+                if (x < 2 || x > 47 || y < 2 || y > 47)
+                    continue;
+                if (room.createConstructionSite(x, y, STRUCTURE_STORAGE) === OK) {
+                    console.log(`[adaptive] Storage site placed at (${x},${y})`);
+                    return;
+                }
+            }
+        }
+    }
+    console.log(`[adaptive] Could not place storage in ${room.name}`);
 }
 // ─── Extensions ──────────────────────────────────────────────────────────────
 function placeExtensions(room, rcl) {
@@ -3898,14 +3936,17 @@ function bestHaulerCarry(energyCap) {
 }
 
 // Updated automatically by `just deploy` — do not edit manually
-const REGIME = '2026-06-02-632898f';
+const REGIME = '2026-06-02-c4ccab5';
 
 const REPORT_INTERVAL = 50;
 const LOG_INTERVAL = 200;
 const LOG_MAX_ENTRIES = 500;
+const LAYOUT_INTERVAL = 1000;
 function reportStats(room) {
     var _a, _b, _c, _d, _e, _f, _g, _h, _j, _k, _l, _m, _o;
     const snap = buildSnapshot(room);
+    if (period(LAYOUT_INTERVAL, `layout:${room.name}`))
+        captureRoomLayout(room);
     if (period(LOG_INTERVAL, 'stats:log')) {
         if (!Memory.statsLog)
             Memory.statsLog = [];
@@ -3964,6 +4005,67 @@ function reportStats(room) {
     };
     console.log(`=== adaptive:stats:${room.name}:${Game.time} ===`);
     console.log(JSON.stringify(full));
+}
+function captureRoomLayout(room) {
+    var _a, _b, _c;
+    if (!Memory.roomLayout)
+        Memory.roomLayout = {};
+    const p = (s) => ({ x: s.pos.x, y: s.pos.y });
+    Memory.roomLayout[room.name] = {
+        tick: Game.time,
+        room: room.name,
+        rcl: (_b = (_a = room.controller) === null || _a === void 0 ? void 0 : _a.level) !== null && _b !== void 0 ? _b : 0,
+        sources: room.find(FIND_SOURCES).map(s => ({ id: s.id, x: s.pos.x, y: s.pos.y })),
+        controller: room.controller ? { id: room.controller.id, x: room.controller.pos.x, y: room.controller.pos.y } : null,
+        spawns: room.find(FIND_MY_SPAWNS).map(s => ({ id: s.id, name: s.name, x: s.pos.x, y: s.pos.y })),
+        extensions: room.find(FIND_MY_STRUCTURES, { filter: s => s.structureType === STRUCTURE_EXTENSION }).map(p),
+        containers: room.find(FIND_STRUCTURES, { filter: s => s.structureType === STRUCTURE_CONTAINER }).map(s => {
+            var _a;
+            const c = s;
+            return { x: s.pos.x, y: s.pos.y, energy: c.store[RESOURCE_ENERGY], capacity: (_a = c.store.getCapacity(RESOURCE_ENERGY)) !== null && _a !== void 0 ? _a : 2000 };
+        }),
+        storage: room.storage ? { x: room.storage.pos.x, y: room.storage.pos.y, energy: room.storage.store[RESOURCE_ENERGY], capacity: (_c = room.storage.store.getCapacity(RESOURCE_ENERGY)) !== null && _c !== void 0 ? _c : 1000000 } : null,
+        towers: room.find(FIND_MY_STRUCTURES, { filter: s => s.structureType === STRUCTURE_TOWER }).map(s => ({ x: s.pos.x, y: s.pos.y, energy: s.store[RESOURCE_ENERGY] })),
+        ramparts: room.find(FIND_MY_STRUCTURES, { filter: s => s.structureType === STRUCTURE_RAMPART }).map(p),
+        roads: room.find(FIND_STRUCTURES, { filter: s => s.structureType === STRUCTURE_ROAD }).map(p),
+        links: room.find(FIND_MY_STRUCTURES, { filter: s => s.structureType === STRUCTURE_LINK }).map(p),
+        sites: room.find(FIND_CONSTRUCTION_SITES).map(s => ({ type: s.structureType, x: s.pos.x, y: s.pos.y, progress: s.progress, total: s.progressTotal })),
+        ascii: buildAsciiMap(room),
+    };
+}
+function buildAsciiMap(room) {
+    const terrain = room.getTerrain();
+    const grid = [];
+    for (let y = 0; y < 50; y++) {
+        const row = [];
+        for (let x = 0; x < 50; x++) {
+            const t = terrain.get(x, y);
+            row.push(t === TERRAIN_MASK_WALL ? '#' : t === TERRAIN_MASK_SWAMP ? '~' : '.');
+        }
+        grid.push(row);
+    }
+    const set = (pos, ch) => { grid[pos.y][pos.x] = ch; };
+    for (const s of room.find(FIND_STRUCTURES, { filter: s => s.structureType === STRUCTURE_ROAD }))
+        set(s.pos, 'r');
+    for (const s of room.find(FIND_STRUCTURES, { filter: s => s.structureType === STRUCTURE_CONTAINER }))
+        set(s.pos, 'c');
+    for (const s of room.find(FIND_MY_STRUCTURES, { filter: s => s.structureType === STRUCTURE_EXTENSION }))
+        set(s.pos, 'e');
+    for (const s of room.find(FIND_MY_STRUCTURES, { filter: s => s.structureType === STRUCTURE_LINK }))
+        set(s.pos, 'L');
+    for (const s of room.find(FIND_MY_STRUCTURES, { filter: s => s.structureType === STRUCTURE_TOWER }))
+        set(s.pos, 'T');
+    if (room.storage)
+        set(room.storage.pos, 'K');
+    for (const s of room.find(FIND_CONSTRUCTION_SITES))
+        set(s.pos, '*');
+    if (room.controller)
+        set(room.controller.pos, 'C');
+    for (const s of room.find(FIND_SOURCES))
+        set(s.pos, 'S');
+    for (const s of room.find(FIND_MY_SPAWNS))
+        set(s.pos, 'O');
+    return grid.map(row => row.join('')).join('\n');
 }
 function buildSnapshot(room) {
     var _a, _b, _c, _d, _e, _f, _g;

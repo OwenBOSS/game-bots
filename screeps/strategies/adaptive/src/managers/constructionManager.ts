@@ -14,11 +14,16 @@ export function manageConstruction(room: Room): void {
     if (period(5, 'construction:prune')) pruneExcessRoadSites(room);
     maintainRoadQueue(room);
 
+    // Containers and storage are checked periodically — they can be destroyed
+    // mid-game and must be re-queued without waiting for an RCL change.
+    // Keys are room-scoped so multi-room setups don't share the same timer.
+    if (period(50, `construction:containers:${room.name}`)) placeContainers(room);
+    if (rcl >= 4 && period(50, `construction:storage:${room.name}`)) placeStorage(room);
+
     if (Memory.roadsPlanned && Memory.lastRCL === rcl) return;
     Memory.roadsPlanned = true;
     Memory.lastRCL = rcl;
 
-    placeContainers(room);
     if (rcl >= 2) placeExtensions(room, rcl);
     if (rcl >= 2) placeRamparts(room);
     if (rcl >= 3) placeTowers(room, rcl);
@@ -131,23 +136,50 @@ function placeContainers(room: Room): void {
         ...(spawn ? [spawn.pos] : []),  // hub container near spawn — pre-RCL4 buffer
     ];
     for (const pos of targets) {
+        // Search range 2 so sources adjacent to spawn (or walls) still find a valid tile.
+        const SEARCH_RANGE = 2;
         const hasNearby =
-            pos.findInRange(FIND_STRUCTURES, 1, { filter: s => s.structureType === STRUCTURE_CONTAINER }).length > 0 ||
-            pos.findInRange(FIND_CONSTRUCTION_SITES, 1, { filter: s => s.structureType === STRUCTURE_CONTAINER }).length > 0;
+            pos.findInRange(FIND_STRUCTURES, SEARCH_RANGE, { filter: s => s.structureType === STRUCTURE_CONTAINER }).length > 0 ||
+            pos.findInRange(FIND_CONSTRUCTION_SITES, SEARCH_RANGE, { filter: s => s.structureType === STRUCTURE_CONTAINER }).length > 0;
         if (hasNearby) continue;
         let placed = false;
-        for (let dx = -1; dx <= 1 && !placed; dx++) {
-            for (let dy = -1; dy <= 1 && !placed; dy++) {
-                if (dx === 0 && dy === 0) continue;
-                const result = room.createConstructionSite(pos.x + dx, pos.y + dy, STRUCTURE_CONTAINER);
-                if (result === OK) { placed = true; }
-                else if (result !== ERR_INVALID_TARGET && result !== ERR_FULL) {
-                    console.log(`[adaptive] Container placement err ${result} at (${pos.x + dx},${pos.y + dy})`);
+        outer:
+        for (let r = 1; r <= SEARCH_RANGE && !placed; r++) {
+            for (let dx = -r; dx <= r && !placed; dx++) {
+                for (let dy = -r; dy <= r && !placed; dy++) {
+                    if (Math.abs(dx) !== r && Math.abs(dy) !== r) continue; // ring only
+                    const x = pos.x + dx, y = pos.y + dy;
+                    if (x < 1 || x > 48 || y < 1 || y > 48) continue;
+                    const result = room.createConstructionSite(x, y, STRUCTURE_CONTAINER);
+                    if (result === OK) { placed = true; break outer; }
                 }
             }
         }
         if (!placed) console.log(`[adaptive] Could not place container near (${pos.x},${pos.y})`);
     }
+}
+
+// ─── Storage (RCL 4+) ────────────────────────────────────────────────────────
+
+function placeStorage(room: Room): void {
+    if (room.storage) return;
+    if (room.find(FIND_CONSTRUCTION_SITES, { filter: s => s.structureType === STRUCTURE_STORAGE }).length > 0) return;
+    const spawn = room.find(FIND_MY_SPAWNS)[0];
+    if (!spawn) return;
+    for (let r = 2; r <= 8; r++) {
+        for (let dx = -r; dx <= r; dx++) {
+            for (let dy = -r; dy <= r; dy++) {
+                if (Math.abs(dx) !== r && Math.abs(dy) !== r) continue;
+                const x = spawn.pos.x + dx, y = spawn.pos.y + dy;
+                if (x < 2 || x > 47 || y < 2 || y > 47) continue;
+                if (room.createConstructionSite(x, y, STRUCTURE_STORAGE) === OK) {
+                    console.log(`[adaptive] Storage site placed at (${x},${y})`);
+                    return;
+                }
+            }
+        }
+    }
+    console.log(`[adaptive] Could not place storage in ${room.name}`);
 }
 
 // ─── Extensions ──────────────────────────────────────────────────────────────
