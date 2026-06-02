@@ -48,3 +48,9 @@ fetch-stats:
 # screeps/dashboard/suggested-changes.md with targeted fix recommendations.
 analyze:
     node dashboard/analyze.mjs
+
+# Run Monte Carlo simulation standalone (no API fetch, uses existing history.json).
+# Useful for tweaking sim parameters without burning an API call.
+# Optional flags: --runs 400  --ticks 4000  --step 50
+sim *flags:
+    node sim/run.mjs {{flags}}

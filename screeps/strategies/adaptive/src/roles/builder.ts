@@ -44,7 +44,16 @@ export function runBuilder(creep: Creep): void {
 }
 
 function collectEnergy(creep: Creep): void {
-    // Containers filled by stationary harvesters — pick the fullest one
+    // Storage first — central buffer filled by haulers; keeps builders near spawn
+    const storage = creep.room.storage;
+    if (storage && storage.store[RESOURCE_ENERGY] >= 200) {
+        if (creep.withdraw(storage, RESOURCE_ENERGY) === ERR_NOT_IN_RANGE) {
+            creep.moveTo(storage, { reusePath: 5 });
+        }
+        return;
+    }
+
+    // Pre-storage fallback: source containers (haulers haven't built up storage yet)
     const containers = creep.room.find(FIND_STRUCTURES, {
         filter: s =>
             s.structureType === STRUCTURE_CONTAINER &&
@@ -56,15 +65,6 @@ function collectEnergy(creep: Creep): void {
         );
         if (creep.withdraw(target, RESOURCE_ENERGY) === ERR_NOT_IN_RANGE) {
             creep.moveTo(target, { reusePath: 5 });
-        }
-        return;
-    }
-
-    // Storage as secondary source
-    const storage = creep.room.storage;
-    if (storage && storage.store[RESOURCE_ENERGY] >= 200) {
-        if (creep.withdraw(storage, RESOURCE_ENERGY) === ERR_NOT_IN_RANGE) {
-            creep.moveTo(storage, { reusePath: 5 });
         }
         return;
     }
@@ -93,18 +93,31 @@ function collectEnergy(creep: Creep): void {
     }
 }
 
-// Returns the highest-priority construction site, ignoring distance.
-// Roads are second — they're high value but capped at 10 pending sites at a time
-// by the construction manager, so the builder won't spend forever on them.
+// Returns the highest-priority construction site.
+// Source containers come first — every source needs its container before
+// anything else, since the whole supply chain depends on them.
 function findBuildTarget(creep: Creep): ConstructionSite | null {
-    const PRIORITY: StructureConstant[] = [
-        STRUCTURE_CONTAINER,   // efficiency gain on every tick once built
-        STRUCTURE_ROAD,        // mobility (capped at 10 sites, so builds fast)
-        STRUCTURE_EXTENSION,   // better spawn bodies (RCL 2+)
-        STRUCTURE_TOWER,       // passive defense (RCL 3+)
-        STRUCTURE_RAMPART,     // protect key structures (RCL 2+)
-    ];
+    // 1. Source containers — adjacent (range 1) to each source
+    const sources = creep.room.find(FIND_SOURCES);
+    const sourceContainerSites: ConstructionSite[] = [];
+    for (const src of sources) {
+        const sites = src.pos.findInRange(FIND_CONSTRUCTION_SITES, 1, {
+            filter: (s: ConstructionSite) => s.structureType === STRUCTURE_CONTAINER,
+        }) as ConstructionSite[];
+        sourceContainerSites.push(...sites);
+    }
+    if (sourceContainerSites.length > 0) {
+        return creep.pos.findClosestByPath(sourceContainerSites) ?? sourceContainerSites[0];
+    }
 
+    // 2. Everything else in priority order
+    const PRIORITY: StructureConstant[] = [
+        STRUCTURE_CONTAINER,   // controller container and any remaining
+        STRUCTURE_ROAD,
+        STRUCTURE_EXTENSION,
+        STRUCTURE_TOWER,
+        STRUCTURE_RAMPART,
+    ];
     for (const type of PRIORITY) {
         const site = creep.pos.findClosestByPath(FIND_CONSTRUCTION_SITES, {
             filter: s => s.structureType === type,
@@ -112,6 +125,5 @@ function findBuildTarget(creep: Creep): ConstructionSite | null {
         if (site) return site;
     }
 
-    // Catch-all for anything else (walls, etc.)
     return creep.pos.findClosestByPath(FIND_CONSTRUCTION_SITES);
 }

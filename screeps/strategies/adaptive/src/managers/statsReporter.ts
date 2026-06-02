@@ -1,5 +1,6 @@
 import { REGIME } from '../regime';
 import { period } from '../utils/period';
+import { computeTotalEnergy } from './economyManager';
 
 const REPORT_INTERVAL = 50;
 const LOG_INTERVAL    = 200;
@@ -45,7 +46,7 @@ export function reportStats(room: Room): void {
         tick:    Game.time,
         phase:   room.memory.phase ?? 'ECONOMY',
         rcl:     ctrl?.level ?? 0,
-        energy:  { avail: room.energyAvailable, cap: room.energyCapacityAvailable, pct: Math.floor(room.energyAvailable / Math.max(room.energyCapacityAvailable, 1) * 100) },
+        energy:  (() => { const { current, capacity } = computeTotalEnergy(room); return { avail: room.energyAvailable, cap: room.energyCapacityAvailable, totalAvail: current, totalCap: capacity, pct: Math.floor(room.energyAvailable / Math.max(room.energyCapacityAvailable, 1) * 100) }; })(),
         controller: ctrl ? { pct: Math.floor(ctrl.progress / Math.max(ctrl.progressTotal, 1) * 100), progress: ctrl.progress, total: ctrl.progressTotal } : null,
         creeps:  { total: allCreeps.length, ...roles },
         structures: {
@@ -87,7 +88,7 @@ function buildSnapshot(room: Room): StatSnapshot {
         regime:  REGIME,
         phase:   room.memory.phase ?? 'ECONOMY',
         rcl:     ctrl?.level ?? 0,
-        energy:  { avail: room.energyAvailable, cap: room.energyCapacityAvailable, netRate: room.memory.energyStatus?.netRate ?? null, bottleneck: room.memory.energyStatus?.bottleneck ?? null },
+        energy:  (() => { const { current, capacity } = computeTotalEnergy(room); return { avail: room.energyAvailable, cap: room.energyCapacityAvailable, totalAvail: current, totalCap: capacity, netRate: room.memory.energyStatus?.netRate ?? null, bottleneck: room.memory.energyStatus?.bottleneck ?? null }; })(),
         creeps:  roles,
         ctrl:    ctrl ? { pct: Math.floor(ctrl.progress / Math.max(ctrl.progressTotal, 1) * 100), progress: ctrl.progress, total: ctrl.progressTotal } : null,
         structs: {

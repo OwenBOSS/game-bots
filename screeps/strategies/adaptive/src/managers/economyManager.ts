@@ -189,11 +189,20 @@ export function calcDynamicTargets(room: Room): DynamicTargets {
     const avgContainerFill = avgField(h, 'containerFillPct', 50);
 
     // ── Harvesters ────────────────────────────────────────────────────────────
-    // SOURCE_MAXED: sources can't keep up → 1 per source keeps steady state
-    // Default: max positions (up to 4) per source — more bodies = more WORK throughput
-    const harvester = bottleneck === 'SOURCE_MAXED'
+    // Bootstrap (no source containers yet): small mobile harvesters act as
+    // combined harvester+hauler — up to 3 per source so cheap bodies cover
+    // the supply gap while containers are being built.
+    // Production (source containers exist): 1 stationary harvester per source
+    // parks on its container; a full body (up to 6 WORK) saturates the
+    // 10e/tick source replenishment rate with no extra bodies needed.
+    const hasSourceContainers = sources.some(src =>
+        src.pos.findInRange(FIND_STRUCTURES, 1, {
+            filter: s => s.structureType === STRUCTURE_CONTAINER,
+        }).length > 0
+    );
+    const harvester = hasSourceContainers
         ? sources.length
-        : sources.reduce((sum, src) => sum + Math.min(walkableAround(src), MAX_HARVESTERS_PER_SOURCE), 0);
+        : sources.reduce((sum, src) => sum + Math.min(walkableAround(src), 3), 0);
 
     // ── Haulers ───────────────────────────────────────────────────────────────
     // Distance-based: haulers_needed = ceil(source_output × round_trip / hauler_carry)

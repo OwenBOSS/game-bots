@@ -21,13 +21,12 @@ describe('calcDynamicTargets', () => {
             expect(t.harvester).toBeGreaterThanOrEqual(2);
         });
 
-        it('returns 1 per source under SOURCE_MAXED', () => {
-            const src1 = makeSource({ id: 'src1' });
-            const src2 = makeSource({ id: 'src2' });
-            const room = makeRoom({
-                sources: [src1, src2],
-                memory: { energyStatus: { bottleneck: 'SOURCE_MAXED' } },
-            });
+        it('returns 1 per source in production mode (source containers exist)', () => {
+            const c1 = makeContainer();
+            const c2 = makeContainer();
+            const src1 = makeSource({ id: 'src1', nearbyContainers: [c1] });
+            const src2 = makeSource({ id: 'src2', nearbyContainers: [c2] });
+            const room = makeRoom({ sources: [src1, src2], containers: [c1, c2] });
             expect(calcDynamicTargets(room).harvester).toBe(2);
         });
     });

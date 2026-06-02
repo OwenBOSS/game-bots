@@ -133,7 +133,8 @@ function stepState(s, dt, noise, strategy) {
     s.rcl++;
     s.ctrl.progress = 0;
     s.ctrl.total    = H.RCL_THRESHOLDS[s.rcl] ?? s.ctrl.total;
-    s.energy.cap    = H.energyCapForRcl(s.rcl);
+    const containerCap = (s.structs.containers ?? 0) * 2000;
+    s.energy.cap    = H.energyCapForRcl(s.rcl) + containerCap;
   }
   s.ctrl.pct = s.ctrl.total > 0 ? Math.round(s.ctrl.progress / s.ctrl.total * 100) : 100;
 
@@ -145,7 +146,8 @@ function stepState(s, dt, noise, strategy) {
     while (s._buildProgress >= 3000 && (s.structs.extensions ?? 0) < maxExtensions) {
       s._buildProgress -= 3000;
       s.structs.extensions = (s.structs.extensions ?? 0) + 1;
-      s.energy.cap = Math.max(s.energy.cap, H.energyCapForRcl(s.rcl)); // recalc with new extensions
+      const cCap = (s.structs.containers ?? 0) * 2000;
+      s.energy.cap = Math.max(s.energy.cap, H.energyCapForRcl(s.rcl) + cCap);
     }
   }
 

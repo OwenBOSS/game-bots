@@ -65,24 +65,60 @@ function maintainRoadQueue(room: Room): void {
     if (pending >= MAX_ROAD_SITES) return;
     const spawn = room.find(FIND_MY_SPAWNS)[0];
     if (!spawn) return;
-    let budget = MAX_ROAD_SITES - pending;
-    for (const source of room.find(FIND_SOURCES)) {
-        if (budget <= 0) break;
-        budget -= placeRoadSection(room, spawn.pos, source.pos, budget);
-    }
-    if (budget > 0 && room.controller) {
-        placeRoadSection(room, spawn.pos, room.controller.pos, budget);
-    }
-}
 
-function placeRoadSection(room: Room, from: RoomPosition, to: RoomPosition, limit: number): number {
-    const path = room.findPath(from, to, { ignoreCreeps: true, swampCost: 1, plainCost: 2, range: 1 });
-    let placed = 0;
-    for (const step of path) {
-        if (placed >= limit) break;
-        if (room.createConstructionSite(step.x, step.y, STRUCTURE_ROAD) === OK) placed++;
+    // Collect candidate road positions from all paths (spawn → each source + controller), deduped
+    const seen = new Set<string>();
+    const candidates: Array<{ x: number; y: number }> = [];
+    const targets: RoomPosition[] = [
+        ...room.find(FIND_SOURCES).map(s => s.pos),
+        ...(room.controller ? [room.controller.pos] : []),
+    ];
+    for (const target of targets) {
+        const path = room.findPath(spawn.pos, target, { ignoreCreeps: true, swampCost: 1, plainCost: 2, range: 1 });
+        for (const step of path) {
+            const key = `${step.x},${step.y}`;
+            if (!seen.has(key)) { seen.add(key); candidates.push({ x: step.x, y: step.y }); }
+        }
     }
-    return placed;
+
+    // Set of already-placed road positions (built or pending). Seed with spawn so first path
+    // tile is treated as "adjacent to existing road" and builds outward from spawn.
+    const placed = new Set<string>([`${spawn.pos.x},${spawn.pos.y}`]);
+    for (const s of room.find(FIND_STRUCTURES, { filter: s => s.structureType === STRUCTURE_ROAD })) {
+        placed.add(`${s.pos.x},${s.pos.y}`);
+    }
+    for (const s of room.find(FIND_CONSTRUCTION_SITES, { filter: s => s.structureType === STRUCTURE_ROAD })) {
+        placed.add(`${s.pos.x},${s.pos.y}`);
+    }
+
+    const unplaced = candidates.filter(c => !placed.has(`${c.x},${c.y}`));
+
+    const isAdjacent = (pos: { x: number; y: number }) => {
+        for (let dx = -1; dx <= 1; dx++) {
+            for (let dy = -1; dy <= 1; dy++) {
+                if (dx === 0 && dy === 0) continue;
+                if (placed.has(`${pos.x + dx},${pos.y + dy}`)) return true;
+            }
+        }
+        return false;
+    };
+
+    // Adjacent tiles first so the road network grows connected; closest to spawn as tiebreak
+    unplaced.sort((a, b) => {
+        const aAdj = isAdjacent(a) ? 0 : 1;
+        const bAdj = isAdjacent(b) ? 0 : 1;
+        if (aAdj !== bAdj) return aAdj - bAdj;
+        return spawn.pos.getRangeTo(a.x, a.y) - spawn.pos.getRangeTo(b.x, b.y);
+    });
+
+    let budget = MAX_ROAD_SITES - pending;
+    for (const pos of unplaced) {
+        if (budget <= 0) break;
+        if (room.createConstructionSite(pos.x, pos.y, STRUCTURE_ROAD) === OK) {
+            budget--;
+            placed.add(`${pos.x},${pos.y}`); // update so next tile can see it as adjacent
+        }
+    }
 }
 
 // ─── Containers ──────────────────────────────────────────────────────────────

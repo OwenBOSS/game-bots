@@ -289,7 +289,8 @@ canvas{width:100%!important;max-height:230px}
 <div class="meta">Ticks ${firstTick.toLocaleString()}&ndash;${lastTick.toLocaleString()} &middot; ${snapshots.length} snapshots (every 200 ticks) &middot; last tick ${lastTick.toLocaleString()}</div>
 <div class="kpis">${kpiHtml}</div>
 <div class="grid">
-  <div class="card"><h2>Energy Available</h2><canvas id="cEnergy"></canvas></div>
+  <div class="card"><h2>Spawn Energy Available</h2><canvas id="cEnergy"></canvas></div>
+  <div class="card"><h2>Total Energy Available</h2><canvas id="cEnergyTotal"></canvas></div>
   <div class="card"><h2>Net Energy Rate</h2><canvas id="cRate"></canvas></div>
   <div class="card"><h2>Controller Progress</h2><canvas id="cCtrl"></canvas></div>
   <div class="card"><h2>Creep Roster</h2><canvas id="cCreeps"></canvas></div>
@@ -345,7 +346,32 @@ new Chart(document.getElementById('cEnergy'), {
       { label: 'Available', data: H.map(s => s.energy?.avail ?? 0),
         borderColor: '#58a6ff', backgroundColor: 'rgba(88,166,255,.15)',
         fill: true, pointRadius: 0, tension: .3 },
-      { label: 'Capacity', data: H.map(s => s.energy?.cap ?? 0),
+      { label: 'Capacity', data: H.map(s => {
+          const cap = s.energy?.cap ?? 0;
+          // Suppress intermediate snapshots where cap was accidentally set to total energy.
+          // New snapshots have totalCap defined; old valid snapshots have cap ≤ ~600.
+          if (s.energy?.totalCap == null && cap > 600) return null;
+          return cap;
+        }),
+        borderColor: '#30363d', borderDash: [4, 4], pointRadius: 0, tension: .3 },
+    ]
+  },
+  options: { ...BASE_OPTS, scales: {
+    x: { ...AXIS_DEFAULTS, ticks: { ...AXIS_DEFAULTS.ticks, maxTicksLimit: 8 } },
+    y: { ...AXIS_DEFAULTS, ticks: { color: '#8b949e', callback: v => v.toLocaleString() } },
+  }},
+});
+
+// ── Total energy (spawn + extensions + containers + storage) ────────────────
+new Chart(document.getElementById('cEnergyTotal'), {
+  type: 'line',
+  data: {
+    labels: ticks,
+    datasets: [
+      { label: 'Total Available', data: H.map(s => s.energy?.totalAvail ?? s.energy?.avail ?? 0),
+        borderColor: '#4caf50', backgroundColor: 'rgba(76,175,80,.15)',
+        fill: true, pointRadius: 0, tension: .3 },
+      { label: 'Total Capacity', data: H.map(s => s.energy?.totalCap ?? s.energy?.cap ?? 0),
         borderColor: '#30363d', borderDash: [4, 4], pointRadius: 0, tension: .3 },
     ]
   },

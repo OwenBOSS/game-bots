@@ -13,9 +13,6 @@ function makeSpawn(name = 'Spawn1'): any {
     };
 }
 
-function makeCreep(role: string, ticksToLive = 1500, homeRoom = 'W1N1'): any {
-    return { memory: { role, homeRoom }, ticksToLive };
-}
 
 beforeEach(() => {
     (global as any).Game = {
@@ -40,18 +37,23 @@ beforeEach(() => {
 
 describe('manageSpawns spawn floor guard', () => {
     it('does NOT spawn upgrader when energyAvailable < 200 (floor)', () => {
-        const ctrl    = makeController({ nearContainer: true, level: 2, ticksToDowngrade: 10000 });
-        const spawn   = makeSpawn();
-        const harv1   = makeCreep('harvester');
-        const harv2   = makeCreep('harvester');
-        const hauler1 = makeCreep('hauler');
-
-        const room = makeRoom({
+        // manageSpawns counts via Game.creeps (homeRoom), not room.find.
+        // Dynamic target: 4 harvesters (8 walkable tiles, cap 4) + 1 hauler (1 source container).
+        // Populate those so the eco loop reaches the upgrader check.
+        (global as any).Game.creeps = {
+            h1: { memory: { role: 'harvester', homeRoom: 'W1N1' }, ticksToLive: 1500 },
+            h2: { memory: { role: 'harvester', homeRoom: 'W1N1' }, ticksToLive: 1500 },
+            h3: { memory: { role: 'harvester', homeRoom: 'W1N1' }, ticksToLive: 1500 },
+            h4: { memory: { role: 'harvester', homeRoom: 'W1N1' }, ticksToLive: 1500 },
+            hl: { memory: { role: 'hauler',    homeRoom: 'W1N1' }, ticksToLive: 1500 },
+        };
+        const ctrl  = makeController({ nearContainer: true, level: 2, ticksToDowngrade: 10000 });
+        const spawn = makeSpawn();
+        const room  = makeRoom({
             name: 'W1N1',
-            energyAvailable: 150,   // below 200 floor
+            energyAvailable: 150,
             energyCapacityAvailable: 300,
             controller: ctrl,
-            myCreeps: [harv1, harv2, hauler1],
             sources: [makeSource({ nearbyContainers: [makeContainer()] })],
             containers: [makeContainer()],
         });
@@ -61,8 +63,6 @@ describe('manageSpawns spawn floor guard', () => {
             pidState: { output: 3, integral: 1, lastError: 0.3, lastTick: 990 },
         };
         spawn.room = room;
-
-        // Register spawn in find results — makeRoom's find() doesn't handle FIND_MY_SPAWNS by default
         const origFind = room.find.getMockImplementation?.() ?? room.find;
         room.find = vi.fn((type: number, opts?: any) => {
             if (type === (global as any).FIND_MY_SPAWNS) return [spawn];
@@ -71,7 +71,6 @@ describe('manageSpawns spawn floor guard', () => {
 
         manageSpawns(room);
 
-        // spawnCreep should not have been called with 'upgrader'
         const calls = (spawn.spawnCreep as ReturnType<typeof vi.fn>).mock.calls;
         const upgCalls = calls.filter(([_body, _name, mem]: any[]) =>
             mem?.memory?.role === 'upgrader',
@@ -86,21 +85,21 @@ describe('manageSpawns spawn floor guard', () => {
         const spawn   = makeSpawn();
         const container = makeContainer();
         const src = makeSource({ nearbyContainers: [container] });
-        // manageSpawns counts creeps via Game.creeps (homeRoom match), not room.find.
-        // Put harvesters there so the harvester floor guard doesn't fire.
+        // Dynamic harvester target = 4 (8 walkable tiles, capped at 4).
+        // Need 4 harvesters in Game.creeps so the harvester eco-role check passes
+        // and the loop reaches hauler (where count=0 < target → should spawn).
         (global as any).Game.creeps = {
-            harv1: { memory: { role: 'harvester', homeRoom: 'W1N1' }, ticksToLive: 1500 },
-            harv2: { memory: { role: 'harvester', homeRoom: 'W1N1' }, ticksToLive: 1500 },
+            h1: { memory: { role: 'harvester', homeRoom: 'W1N1' }, ticksToLive: 1500 },
+            h2: { memory: { role: 'harvester', homeRoom: 'W1N1' }, ticksToLive: 1500 },
+            h3: { memory: { role: 'harvester', homeRoom: 'W1N1' }, ticksToLive: 1500 },
+            h4: { memory: { role: 'harvester', homeRoom: 'W1N1' }, ticksToLive: 1500 },
         };
-        const harv1 = makeCreep('harvester');
-        const harv2 = makeCreep('harvester');
 
         const room = makeRoom({
             name: 'W1N1',
             energyAvailable: 150,
             energyCapacityAvailable: 300,
             controller: ctrl,
-            myCreeps: [harv1, harv2],
             sources: [src],
             containers: [container],
         });
@@ -126,18 +125,21 @@ describe('manageSpawns spawn floor guard', () => {
     });
 
     it('does NOT spawn scout when energyAvailable < 200', () => {
+        // No source container → hauler target=0, upgrader target=0.
+        // Need 4 harvesters in Game.creeps so the eco loop reaches scout.
+        (global as any).Game.creeps = {
+            h1: { memory: { role: 'harvester', homeRoom: 'W1N1' }, ticksToLive: 1500 },
+            h2: { memory: { role: 'harvester', homeRoom: 'W1N1' }, ticksToLive: 1500 },
+            h3: { memory: { role: 'harvester', homeRoom: 'W1N1' }, ticksToLive: 1500 },
+            h4: { memory: { role: 'harvester', homeRoom: 'W1N1' }, ticksToLive: 1500 },
+        };
         const ctrl  = makeController({ nearContainer: false, level: 2, ticksToDowngrade: 10000 });
         const spawn = makeSpawn();
-        const harv1 = makeCreep('harvester');
-        const harv2 = makeCreep('harvester');
-        const hauler = makeCreep('hauler');
-
-        const room = makeRoom({
+        const room  = makeRoom({
             name: 'W1N1',
             energyAvailable: 160,
             energyCapacityAvailable: 300,
             controller: ctrl,
-            myCreeps: [harv1, harv2, hauler],
             sources: [makeSource()],
         });
         room.memory = {

@@ -58,14 +58,16 @@ export function runMonteCarlo(initialState, opts = {}) {
   const creepTotByStep  = Array.from({ length: steps }, () => []);
   const rclByStep       = Array.from({ length: steps }, () => []);
 
-  // Milestone: which tick did each run first reach RCL3? (Infinity if never)
-  const rcl3Ticks = [];
+  // Milestone accumulators (collected in the same loop, no extra runs needed)
+  const rcl3Ticks  = [];
+  const crisisRates = [];
 
-  // Run the default (adaptive) strategy for the main projection bands
+  // Run the default (adaptive) strategy for projection bands + milestone data
   for (let r = 0; r < runs; r++) {
     const snaps = simulateOnce(initialState, ticksForward, { stepSize, strategy: 'adaptive', noisy: true, calibration });
 
-    let rcl3Tick = Infinity;
+    let rcl3Tick   = Infinity;
+    let crisisCount = 0;
     snaps.forEach((s, i) => {
       energyByStep[i].push(s.energy.avail);
       ctrlPctByStep[i].push(s.ctrl.pct);
@@ -73,8 +75,10 @@ export function runMonteCarlo(initialState, opts = {}) {
       rclByStep[i].push(s.rcl);
 
       if (rcl3Tick === Infinity && s.rcl >= 3) rcl3Tick = s.elapsed;
+      if (s.energy.avail < s.energy.cap * 0.10) crisisCount++;
     });
     rcl3Ticks.push(rcl3Tick);
+    crisisRates.push(crisisCount / snaps.length);
   }
 
   // ── Percentile bands ────────────────────────────────────────────────────────
@@ -94,14 +98,6 @@ export function runMonteCarlo(initialState, opts = {}) {
   const rcl3Finite = rcl3Ticks.filter(t => t < Infinity);
   const rcl3Prob   = rcl3Finite.length / runs;
   const rcl3Percs  = rcl3Finite.length > 0 ? percentilesOf(rcl3Finite) : null;
-
-  // Energy crisis: fraction of steps per run where energy < 10% cap
-  const crisisRates = [];
-  for (let r = 0; r < runs; r++) {
-    const snaps = simulateOnce(initialState, ticksForward, { stepSize, strategy: 'adaptive', noisy: true, calibration });
-    const crisisCount = snaps.filter(s => s.energy.avail < s.energy.cap * 0.10).length;
-    crisisRates.push(crisisCount / snaps.length);
-  }
   const avgCrisisRate = crisisRates.reduce((a, b) => a + b, 0) / crisisRates.length;
 
   // ── Build order comparison ──────────────────────────────────────────────────

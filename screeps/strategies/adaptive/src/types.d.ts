@@ -120,7 +120,7 @@ declare global {
         regime:  string;
         phase:   string;
         rcl:     number;
-        energy:  { avail: number; cap: number; netRate: number | null; bottleneck?: string | null };
+        energy:  { avail: number; cap: number; totalAvail: number; totalCap: number; netRate: number | null; bottleneck?: string | null };
         creeps:  Record<string, number>;
         ctrl:    { pct: number; progress: number; total: number } | null;
         structs: { roads: number; containers: number; extensions: number; towers: number; ramparts: number };

@@ -13,7 +13,10 @@
 // Find constants
 (global as any).FIND_MY_CREEPS          = 104;
 (global as any).FIND_STRUCTURES         = 107;
+(global as any).FIND_MY_STRUCTURES      = 108;
 (global as any).FIND_SOURCES            = 105;
+(global as any).FIND_SOURCES_ACTIVE     = 112;
+(global as any).FIND_DROPPED_RESOURCES  = 106;
 (global as any).FIND_CONSTRUCTION_SITES = 109;
 (global as any).FIND_HOSTILE_CREEPS     = 103;
 (global as any).FIND_MY_SPAWNS          = 101;

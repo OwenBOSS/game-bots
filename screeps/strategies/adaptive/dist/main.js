@@ -246,8 +246,8 @@ function collect$1(creep) {
         }
         return;
     }
-    // 2. Containers — use cached target ID to avoid expensive find every tick
-    const container = getCachedContainer(creep, creep.room.name);
+    // 2. Source containers only — skip controller container (upgraders drain that)
+    const container = getCachedSourceContainer(creep);
     if (container) {
         if (creep.withdraw(container, RESOURCE_ENERGY) === ERR_NOT_IN_RANGE) {
             creep.moveTo(container, { reusePath: 5 });
@@ -316,6 +316,37 @@ function needsEnergy(s) {
 }
 // ─── Container cache ──────────────────────────────────────────────────────────
 // Reuses the same container until it runs dry, then re-picks the fullest.
+// Local collect: only containers adjacent to a source (range 1).
+// Prevents haulers from draining the controller container that upgraders need.
+function getCachedSourceContainer(creep) {
+    const cached = creep.memory.targetId
+        ? Game.getObjectById(creep.memory.targetId)
+        : null;
+    if (cached && cached.structureType === STRUCTURE_CONTAINER) {
+        const c = cached;
+        if (c.store[RESOURCE_ENERGY] >= 50 && isAdjacentToSource(c, creep.room))
+            return c;
+    }
+    const sources = creep.room.find(FIND_SOURCES);
+    const candidates = [];
+    for (const src of sources) {
+        const near = src.pos.findInRange(FIND_STRUCTURES, 1, {
+            filter: s => s.structureType === STRUCTURE_CONTAINER &&
+                s.store[RESOURCE_ENERGY] >= 50,
+        });
+        candidates.push(...near);
+    }
+    if (candidates.length === 0) {
+        creep.memory.targetId = undefined;
+        return null;
+    }
+    const best = candidates.reduce((a, b) => a.store[RESOURCE_ENERGY] >= b.store[RESOURCE_ENERGY] ? a : b);
+    creep.memory.targetId = best.id;
+    return best;
+}
+function isAdjacentToSource(container, room) {
+    return room.find(FIND_SOURCES).some(src => src.pos.isNearTo(container.pos));
+}
 function getCachedContainer(creep, inRoom) {
     if (creep.room.name !== inRoom)
         return null;
@@ -460,7 +491,15 @@ function runBuilder(creep) {
     }
 }
 function collectEnergy(creep) {
-    // Containers filled by stationary harvesters — pick the fullest one
+    // Storage first — central buffer filled by haulers; keeps builders near spawn
+    const storage = creep.room.storage;
+    if (storage && storage.store[RESOURCE_ENERGY] >= 200) {
+        if (creep.withdraw(storage, RESOURCE_ENERGY) === ERR_NOT_IN_RANGE) {
+            creep.moveTo(storage, { reusePath: 5 });
+        }
+        return;
+    }
+    // Pre-storage fallback: source containers (haulers haven't built up storage yet)
     const containers = creep.room.find(FIND_STRUCTURES, {
         filter: s => s.structureType === STRUCTURE_CONTAINER &&
             s.store[RESOURCE_ENERGY] >= 50,
@@ -469,14 +508,6 @@ function collectEnergy(creep) {
         const target = containers.reduce((a, b) => a.store[RESOURCE_ENERGY] >= b.store[RESOURCE_ENERGY] ? a : b);
         if (creep.withdraw(target, RESOURCE_ENERGY) === ERR_NOT_IN_RANGE) {
             creep.moveTo(target, { reusePath: 5 });
-        }
-        return;
-    }
-    // Storage as secondary source
-    const storage = creep.room.storage;
-    if (storage && storage.store[RESOURCE_ENERGY] >= 200) {
-        if (creep.withdraw(storage, RESOURCE_ENERGY) === ERR_NOT_IN_RANGE) {
-            creep.moveTo(storage, { reusePath: 5 });
         }
         return;
     }
@@ -502,16 +533,30 @@ function collectEnergy(creep) {
         }
     }
 }
-// Returns the highest-priority construction site, ignoring distance.
-// Roads are second — they're high value but capped at 10 pending sites at a time
-// by the construction manager, so the builder won't spend forever on them.
+// Returns the highest-priority construction site.
+// Source containers come first — every source needs its container before
+// anything else, since the whole supply chain depends on them.
 function findBuildTarget(creep) {
+    var _a;
+    // 1. Source containers — adjacent (range 1) to each source
+    const sources = creep.room.find(FIND_SOURCES);
+    const sourceContainerSites = [];
+    for (const src of sources) {
+        const sites = src.pos.findInRange(FIND_CONSTRUCTION_SITES, 1, {
+            filter: (s) => s.structureType === STRUCTURE_CONTAINER,
+        });
+        sourceContainerSites.push(...sites);
+    }
+    if (sourceContainerSites.length > 0) {
+        return (_a = creep.pos.findClosestByPath(sourceContainerSites)) !== null && _a !== void 0 ? _a : sourceContainerSites[0];
+    }
+    // 2. Everything else in priority order
     const PRIORITY = [
-        STRUCTURE_CONTAINER, // efficiency gain on every tick once built
-        STRUCTURE_ROAD, // mobility (capped at 10 sites, so builds fast)
-        STRUCTURE_EXTENSION, // better spawn bodies (RCL 2+)
-        STRUCTURE_TOWER, // passive defense (RCL 3+)
-        STRUCTURE_RAMPART, // protect key structures (RCL 2+)
+        STRUCTURE_CONTAINER, // controller container and any remaining
+        STRUCTURE_ROAD,
+        STRUCTURE_EXTENSION,
+        STRUCTURE_TOWER,
+        STRUCTURE_RAMPART,
     ];
     for (const type of PRIORITY) {
         const site = creep.pos.findClosestByPath(FIND_CONSTRUCTION_SITES, {
@@ -520,7 +565,6 @@ function findBuildTarget(creep) {
         if (site)
             return site;
     }
-    // Catch-all for anything else (walls, etc.)
     return creep.pos.findClosestByPath(FIND_CONSTRUCTION_SITES);
 }
 
@@ -2094,7 +2138,6 @@ function computePID(pv, cap, state, config, tick) {
 //   BALANCED            → no constraint; use baseline targets
 const SAMPLE_INTERVAL = 5; // sample every N ticks
 const WINDOW_SIZE = 20; // samples kept (= WINDOW_SIZE × SAMPLE_INTERVAL ticks)
-const MAX_HARVESTERS_PER_SOURCE = 4;
 const MAX_HAULERS_PER_SOURCE = 3; // hard cap: sources * MAX + 2
 // ─── Total energy (PV for PID) ────────────────────────────────────────────────
 function computeTotalEnergy(room) {
@@ -2227,11 +2270,18 @@ function calcDynamicTargets(room) {
     const h = ((_g = room.memory.energyHistory) !== null && _g !== void 0 ? _g : []).slice(-8);
     const avgContainerFill = avgField(h, 'containerFillPct', 50);
     // ── Harvesters ────────────────────────────────────────────────────────────
-    // SOURCE_MAXED: sources can't keep up → 1 per source keeps steady state
-    // Default: max positions (up to 4) per source — more bodies = more WORK throughput
-    const harvester = bottleneck === 'SOURCE_MAXED'
+    // Bootstrap (no source containers yet): small mobile harvesters act as
+    // combined harvester+hauler — up to 3 per source so cheap bodies cover
+    // the supply gap while containers are being built.
+    // Production (source containers exist): 1 stationary harvester per source
+    // parks on its container; a full body (up to 6 WORK) saturates the
+    // 10e/tick source replenishment rate with no extra bodies needed.
+    const hasSourceContainers = sources.some(src => src.pos.findInRange(FIND_STRUCTURES, 1, {
+        filter: s => s.structureType === STRUCTURE_CONTAINER,
+    }).length > 0);
+    const harvester = hasSourceContainers
         ? sources.length
-        : sources.reduce((sum, src) => sum + Math.min(walkableAround(src), MAX_HARVESTERS_PER_SOURCE), 0);
+        : sources.reduce((sum, src) => sum + Math.min(walkableAround(src), 3), 0);
     // ── Haulers ───────────────────────────────────────────────────────────────
     // Distance-based: haulers_needed = ceil(source_output × round_trip / hauler_carry)
     // Source output = 10e/tick; round trip = 2 × path_distance_to_storage (cached).
@@ -2777,26 +2827,61 @@ function maintainRoadQueue(room) {
     const spawn = room.find(FIND_MY_SPAWNS)[0];
     if (!spawn)
         return;
+    // Collect candidate road positions from all paths (spawn → each source + controller), deduped
+    const seen = new Set();
+    const candidates = [];
+    const targets = [
+        ...room.find(FIND_SOURCES).map(s => s.pos),
+        ...(room.controller ? [room.controller.pos] : []),
+    ];
+    for (const target of targets) {
+        const path = room.findPath(spawn.pos, target, { ignoreCreeps: true, swampCost: 1, plainCost: 2, range: 1 });
+        for (const step of path) {
+            const key = `${step.x},${step.y}`;
+            if (!seen.has(key)) {
+                seen.add(key);
+                candidates.push({ x: step.x, y: step.y });
+            }
+        }
+    }
+    // Set of already-placed road positions (built or pending). Seed with spawn so first path
+    // tile is treated as "adjacent to existing road" and builds outward from spawn.
+    const placed = new Set([`${spawn.pos.x},${spawn.pos.y}`]);
+    for (const s of room.find(FIND_STRUCTURES, { filter: s => s.structureType === STRUCTURE_ROAD })) {
+        placed.add(`${s.pos.x},${s.pos.y}`);
+    }
+    for (const s of room.find(FIND_CONSTRUCTION_SITES, { filter: s => s.structureType === STRUCTURE_ROAD })) {
+        placed.add(`${s.pos.x},${s.pos.y}`);
+    }
+    const unplaced = candidates.filter(c => !placed.has(`${c.x},${c.y}`));
+    const isAdjacent = (pos) => {
+        for (let dx = -1; dx <= 1; dx++) {
+            for (let dy = -1; dy <= 1; dy++) {
+                if (dx === 0 && dy === 0)
+                    continue;
+                if (placed.has(`${pos.x + dx},${pos.y + dy}`))
+                    return true;
+            }
+        }
+        return false;
+    };
+    // Adjacent tiles first so the road network grows connected; closest to spawn as tiebreak
+    unplaced.sort((a, b) => {
+        const aAdj = isAdjacent(a) ? 0 : 1;
+        const bAdj = isAdjacent(b) ? 0 : 1;
+        if (aAdj !== bAdj)
+            return aAdj - bAdj;
+        return spawn.pos.getRangeTo(a.x, a.y) - spawn.pos.getRangeTo(b.x, b.y);
+    });
     let budget = MAX_ROAD_SITES - pending;
-    for (const source of room.find(FIND_SOURCES)) {
+    for (const pos of unplaced) {
         if (budget <= 0)
             break;
-        budget -= placeRoadSection(room, spawn.pos, source.pos, budget);
+        if (room.createConstructionSite(pos.x, pos.y, STRUCTURE_ROAD) === OK) {
+            budget--;
+            placed.add(`${pos.x},${pos.y}`); // update so next tile can see it as adjacent
+        }
     }
-    if (budget > 0 && room.controller) {
-        placeRoadSection(room, spawn.pos, room.controller.pos, budget);
-    }
-}
-function placeRoadSection(room, from, to, limit) {
-    const path = room.findPath(from, to, { ignoreCreeps: true, swampCost: 1, plainCost: 2, range: 1 });
-    let placed = 0;
-    for (const step of path) {
-        if (placed >= limit)
-            break;
-        if (room.createConstructionSite(step.x, step.y, STRUCTURE_ROAD) === OK)
-            placed++;
-    }
-    return placed;
 }
 // ─── Containers ──────────────────────────────────────────────────────────────
 function placeContainers(room) {
@@ -3784,7 +3869,7 @@ function bestHaulerCarry(energyCap) {
 }
 
 // Updated automatically by `just deploy` — do not edit manually
-const REGIME = '2026-06-02-7ea6d25';
+const REGIME = '2026-06-02-bcf2862';
 
 const REPORT_INTERVAL = 50;
 const LOG_INTERVAL = 200;
@@ -3825,7 +3910,7 @@ function reportStats(room) {
         tick: Game.time,
         phase: (_c = room.memory.phase) !== null && _c !== void 0 ? _c : 'ECONOMY',
         rcl: (_d = ctrl === null || ctrl === void 0 ? void 0 : ctrl.level) !== null && _d !== void 0 ? _d : 0,
-        energy: { avail: room.energyAvailable, cap: room.energyCapacityAvailable, pct: Math.floor(room.energyAvailable / Math.max(room.energyCapacityAvailable, 1) * 100) },
+        energy: (() => { const { current, capacity } = computeTotalEnergy(room); return { avail: room.energyAvailable, cap: room.energyCapacityAvailable, totalAvail: current, totalCap: capacity, pct: Math.floor(room.energyAvailable / Math.max(room.energyCapacityAvailable, 1) * 100) }; })(),
         controller: ctrl ? { pct: Math.floor(ctrl.progress / Math.max(ctrl.progressTotal, 1) * 100), progress: ctrl.progress, total: ctrl.progressTotal } : null,
         creeps: { total: allCreeps.length, ...roles },
         structures: {
@@ -3852,7 +3937,7 @@ function reportStats(room) {
     console.log(JSON.stringify(full));
 }
 function buildSnapshot(room) {
-    var _a, _b, _c, _d, _e, _f, _g, _h, _j, _k, _l;
+    var _a, _b, _c, _d, _e, _f, _g;
     const ctrl = room.controller;
     const allCreeps = Object.values(Game.creeps);
     const roles = {};
@@ -3864,7 +3949,7 @@ function buildSnapshot(room) {
         regime: REGIME,
         phase: (_b = room.memory.phase) !== null && _b !== void 0 ? _b : 'ECONOMY',
         rcl: (_c = ctrl === null || ctrl === void 0 ? void 0 : ctrl.level) !== null && _c !== void 0 ? _c : 0,
-        energy: { avail: room.energyAvailable, cap: room.energyCapacityAvailable, netRate: (_e = (_d = room.memory.energyStatus) === null || _d === void 0 ? void 0 : _d.netRate) !== null && _e !== void 0 ? _e : null, bottleneck: (_g = (_f = room.memory.energyStatus) === null || _f === void 0 ? void 0 : _f.bottleneck) !== null && _g !== void 0 ? _g : null },
+        energy: (() => { var _a, _b, _c, _d; const { current, capacity } = computeTotalEnergy(room); return { avail: room.energyAvailable, cap: room.energyCapacityAvailable, totalAvail: current, totalCap: capacity, netRate: (_b = (_a = room.memory.energyStatus) === null || _a === void 0 ? void 0 : _a.netRate) !== null && _b !== void 0 ? _b : null, bottleneck: (_d = (_c = room.memory.energyStatus) === null || _c === void 0 ? void 0 : _c.bottleneck) !== null && _d !== void 0 ? _d : null }; })(),
         creeps: roles,
         ctrl: ctrl ? { pct: Math.floor(ctrl.progress / Math.max(ctrl.progressTotal, 1) * 100), progress: ctrl.progress, total: ctrl.progressTotal } : null,
         structs: {
@@ -3875,10 +3960,10 @@ function buildSnapshot(room) {
             ramparts: count(STRUCTURE_RAMPART),
         },
         combat: {
-            state: (_h = room.memory.combatState) !== null && _h !== void 0 ? _h : 'RALLY',
-            warriors: (_j = roles['warrior']) !== null && _j !== void 0 ? _j : 0,
-            rangers: (_k = roles['ranger']) !== null && _k !== void 0 ? _k : 0,
-            target: (_l = room.memory.enemyRoomName) !== null && _l !== void 0 ? _l : null,
+            state: (_d = room.memory.combatState) !== null && _d !== void 0 ? _d : 'RALLY',
+            warriors: (_e = roles['warrior']) !== null && _e !== void 0 ? _e : 0,
+            rangers: (_f = roles['ranger']) !== null && _f !== void 0 ? _f : 0,
+            target: (_g = room.memory.enemyRoomName) !== null && _g !== void 0 ? _g : null,
         },
     };
 }

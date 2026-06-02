@@ -110,8 +110,8 @@ function collect(creep: Creep): void {
         return;
     }
 
-    // 2. Containers — use cached target ID to avoid expensive find every tick
-    const container = getCachedContainer(creep, creep.room.name);
+    // 2. Source containers only — skip controller container (upgraders drain that)
+    const container = getCachedSourceContainer(creep);
     if (container) {
         if (creep.withdraw(container, RESOURCE_ENERGY) === ERR_NOT_IN_RANGE) {
             creep.moveTo(container, { reusePath: 5 });
@@ -182,6 +182,44 @@ function needsEnergy(s: AnyStructure | null): boolean {
 
 // ─── Container cache ──────────────────────────────────────────────────────────
 // Reuses the same container until it runs dry, then re-picks the fullest.
+
+// Local collect: only containers adjacent to a source (range 1).
+// Prevents haulers from draining the controller container that upgraders need.
+function getCachedSourceContainer(creep: Creep): StructureContainer | null {
+    const cached = creep.memory.targetId
+        ? Game.getObjectById(creep.memory.targetId as Id<StructureContainer>)
+        : null;
+
+    if (cached && (cached as StructureContainer).structureType === STRUCTURE_CONTAINER) {
+        const c = cached as StructureContainer;
+        if (c.store[RESOURCE_ENERGY] >= 50 && isAdjacentToSource(c, creep.room)) return c;
+    }
+
+    const sources = creep.room.find(FIND_SOURCES);
+    const candidates: StructureContainer[] = [];
+    for (const src of sources) {
+        const near = src.pos.findInRange(FIND_STRUCTURES, 1, {
+            filter: s => s.structureType === STRUCTURE_CONTAINER &&
+                (s as StructureContainer).store[RESOURCE_ENERGY] >= 50,
+        }) as StructureContainer[];
+        candidates.push(...near);
+    }
+
+    if (candidates.length === 0) {
+        creep.memory.targetId = undefined;
+        return null;
+    }
+
+    const best = candidates.reduce((a, b) =>
+        a.store[RESOURCE_ENERGY] >= b.store[RESOURCE_ENERGY] ? a : b
+    );
+    creep.memory.targetId = best.id as string;
+    return best;
+}
+
+function isAdjacentToSource(container: StructureContainer, room: Room): boolean {
+    return room.find(FIND_SOURCES).some(src => src.pos.isNearTo(container.pos));
+}
 
 function getCachedContainer(creep: Creep, inRoom: string): StructureContainer | null {
     if (creep.room.name !== inRoom) return null;
