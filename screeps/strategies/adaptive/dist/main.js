@@ -2,7 +2,15 @@
 
 // Stationary harvester: parks at an assigned source, harvests into the adjacent
 // container. Falls back to mobile delivery if no container exists yet.
+//
+// Remote mode (creep.memory.remoteRoom set): travels to the remote room and
+// mines there. Energy drops into the remote container for remote haulers to collect.
 function runHarvester(creep) {
+    // Remote mode: mine in a reserved room — remote haulers carry energy home
+    if (creep.memory.remoteRoom) {
+        runRemote(creep);
+        return;
+    }
     const source = getAssignedSource(creep);
     if (!source)
         return;
@@ -14,16 +22,44 @@ function runHarvester(creep) {
         runMobile(creep, source);
     }
 }
+// ─── Remote mode ─────────────────────────────────────────────────────────────
+function runRemote(creep) {
+    const target = creep.memory.remoteRoom;
+    if (creep.room.name !== target) {
+        moveToRoom$7(creep, target);
+        return;
+    }
+    // Assign a source in this room (same least-contested logic)
+    const source = getAssignedSource(creep);
+    if (!source)
+        return;
+    const container = findNearbyContainer(source);
+    if (container) {
+        // Park on container and mine into it — remote hauler will collect
+        if (!creep.pos.isEqualTo(container.pos)) {
+            creep.moveTo(container.pos, { reusePath: 10 });
+            return;
+        }
+        creep.harvest(source);
+        if (creep.store.getFreeCapacity() === 0) {
+            creep.transfer(container, RESOURCE_ENERGY);
+        }
+    }
+    else {
+        // No container yet — mine and drop on ground (remote hauler picks up dropped)
+        if (creep.harvest(source) === ERR_NOT_IN_RANGE) {
+            creep.moveTo(source, { reusePath: 5 });
+        }
+    }
+}
 // ─── Stationary mode ─────────────────────────────────────────────────────────
 function runStationary(creep, source, container) {
-    // Move onto the container tile to mine directly into it
     if (!creep.pos.isEqualTo(container.pos)) {
         creep.moveTo(container.pos, { reusePath: 10, visualizePathStyle: undefined });
         return;
     }
     creep.harvest(source);
     if (creep.store.getFreeCapacity() === 0) {
-        // Prefer a link over the container — links teleport energy instantly, no hauler trip needed
         const link = source.pos.findInRange(FIND_MY_STRUCTURES, 2, {
             filter: s => s.structureType === STRUCTURE_LINK &&
                 s.store.getFreeCapacity(RESOURCE_ENERGY) > 0,
@@ -52,8 +88,6 @@ function runMobile(creep, source) {
             }
         }
         else {
-            // Nothing else needs energy — upgrade RC as a productive last resort.
-            // This is intentional: surplus energy is better spent on RCL than wasted.
             const controller = creep.room.controller;
             if (controller && creep.upgradeController(controller) === ERR_NOT_IN_RANGE) {
                 creep.moveTo(controller, { reusePath: 5 });
@@ -72,7 +106,6 @@ function getAssignedSource(creep) {
     if (creep.memory.sourceId) {
         return Game.getObjectById(creep.memory.sourceId);
     }
-    // Assign to the least-contested source
     const sources = creep.room.find(FIND_SOURCES);
     const counts = new Map();
     for (const c of creep.room.find(FIND_MY_CREEPS)) {
@@ -109,10 +142,19 @@ function findDeliveryTarget(creep) {
         },
     });
 }
+function moveToRoom$7(creep, roomName) {
+    creep.moveTo(new RoomPosition(25, 25, roomName), { reusePath: 20, range: 23 });
+}
 
 // Hauler: decouples harvesting from delivery.
 // Collection priority: hub link > fullest container > storage > dropped > harvest
 // Delivery priority: extensions > spawn > towers > storage
+//
+// Remote mode (creep.memory.remoteRoom set): cross-room hauler that collects from
+// a reserved room's containers and delivers to homeRoom's storage.
+//
+// CPU optimisation: target IDs are cached in creep.memory.targetId so
+// findClosestByPath is only called when the cached target is gone or empty.
 function runHauler(creep) {
     if (creep.memory.working && creep.store[RESOURCE_ENERGY] === 0) {
         creep.memory.working = false;
@@ -120,14 +162,79 @@ function runHauler(creep) {
     if (!creep.memory.working && creep.store.getFreeCapacity() === 0) {
         creep.memory.working = true;
     }
-    if (creep.memory.working) {
-        deliver(creep);
+    if (creep.memory.remoteRoom) {
+        creep.memory.working ? deliverRemote(creep) : collectRemote(creep);
     }
     else {
-        collect(creep);
+        creep.memory.working ? deliver$1(creep) : collect$1(creep);
     }
 }
-function collect(creep) {
+// ─── Remote mode ─────────────────────────────────────────────────────────────
+function collectRemote(creep) {
+    const remote = creep.memory.remoteRoom;
+    if (creep.room.name !== remote) {
+        moveToRoom$6(creep, remote);
+        return;
+    }
+    // Tombstones first (about to vanish)
+    const tomb = creep.pos.findClosestByPath(FIND_TOMBSTONES, {
+        filter: t => t.store[RESOURCE_ENERGY] >= 50,
+    });
+    if (tomb) {
+        if (creep.withdraw(tomb, RESOURCE_ENERGY) === ERR_NOT_IN_RANGE)
+            creep.moveTo(tomb, { reusePath: 3 });
+        return;
+    }
+    // Containers (filled by remote miners)
+    const container = getCachedContainer(creep, remote);
+    if (container) {
+        if (creep.withdraw(container, RESOURCE_ENERGY) === ERR_NOT_IN_RANGE) {
+            creep.moveTo(container, { reusePath: 5 });
+        }
+        return;
+    }
+    // Dropped energy
+    const dropped = creep.pos.findClosestByPath(FIND_DROPPED_RESOURCES, {
+        filter: r => r.resourceType === RESOURCE_ENERGY && r.amount >= 50,
+    });
+    if (dropped) {
+        if (creep.pickup(dropped) === ERR_NOT_IN_RANGE)
+            creep.moveTo(dropped, { reusePath: 3 });
+        return;
+    }
+    // Nothing to collect — go home rather than idle
+    const home = creep.memory.homeRoom;
+    if (home)
+        moveToRoom$6(creep, home);
+}
+function deliverRemote(creep) {
+    const home = creep.memory.homeRoom;
+    if (!home)
+        return;
+    if (creep.room.name !== home) {
+        moveToRoom$6(creep, home);
+        return;
+    }
+    // Deposit into storage (remote energy goes straight to buffer)
+    const storage = creep.room.storage;
+    if (storage && storage.store.getFreeCapacity(RESOURCE_ENERGY) > 0) {
+        if (creep.transfer(storage, RESOURCE_ENERGY) === ERR_NOT_IN_RANGE) {
+            creep.moveTo(storage, { reusePath: 5 });
+        }
+        return;
+    }
+    // Fallback: fill spawn/extensions if storage is absent or full
+    const spawn = creep.pos.findClosestByPath(FIND_MY_STRUCTURES, {
+        filter: (s) => (s.structureType === STRUCTURE_SPAWN || s.structureType === STRUCTURE_EXTENSION) &&
+            s.store.getFreeCapacity(RESOURCE_ENERGY) > 0,
+    });
+    if (spawn) {
+        if (creep.transfer(spawn, RESOURCE_ENERGY) === ERR_NOT_IN_RANGE)
+            creep.moveTo(spawn, { reusePath: 5 });
+    }
+}
+// ─── Normal mode ──────────────────────────────────────────────────────────────
+function collect$1(creep) {
     // 1. Hub links — energy teleported from sources, no travel needed
     const link = creep.pos.findClosestByPath(FIND_MY_STRUCTURES, {
         filter: s => s.structureType === STRUCTURE_LINK &&
@@ -139,15 +246,11 @@ function collect(creep) {
         }
         return;
     }
-    // 2. Containers (filled by stationary harvesters)
-    const containers = creep.room.find(FIND_STRUCTURES, {
-        filter: s => s.structureType === STRUCTURE_CONTAINER &&
-            s.store[RESOURCE_ENERGY] >= 50,
-    });
-    if (containers.length > 0) {
-        const target = containers.reduce((a, b) => a.store[RESOURCE_ENERGY] >= b.store[RESOURCE_ENERGY] ? a : b);
-        if (creep.withdraw(target, RESOURCE_ENERGY) === ERR_NOT_IN_RANGE) {
-            creep.moveTo(target, { reusePath: 5 });
+    // 2. Containers — use cached target ID to avoid expensive find every tick
+    const container = getCachedContainer(creep, creep.room.name);
+    if (container) {
+        if (creep.withdraw(container, RESOURCE_ENERGY) === ERR_NOT_IN_RANGE) {
+            creep.moveTo(container, { reusePath: 5 });
         }
         return;
     }
@@ -175,29 +278,72 @@ function collect(creep) {
         creep.moveTo(source, { reusePath: 5 });
     }
 }
-function deliver(creep) {
-    const target = creep.pos.findClosestByPath(FIND_MY_STRUCTURES, {
-        filter: s => {
-            if (s.structureType === STRUCTURE_EXTENSION) {
-                return s.store.getFreeCapacity(RESOURCE_ENERGY) > 0;
-            }
-            if (s.structureType === STRUCTURE_SPAWN) {
-                return s.store.getFreeCapacity(RESOURCE_ENERGY) > 0;
-            }
-            if (s.structureType === STRUCTURE_TOWER) {
-                return s.store.getFreeCapacity(RESOURCE_ENERGY) > 200;
-            }
-            if (s.structureType === STRUCTURE_STORAGE) {
-                return s.store.getFreeCapacity(RESOURCE_ENERGY) > 0;
-            }
-            return false;
-        },
-    });
+function deliver$1(creep) {
+    // Use cached delivery target ID to avoid findClosestByPath every tick
+    const cached = creep.memory.targetId
+        ? Game.getObjectById(creep.memory.targetId)
+        : null;
+    let target = null;
+    if (cached && needsEnergy(cached)) {
+        target = cached;
+    }
+    else {
+        creep.memory.targetId = undefined;
+        target = creep.pos.findClosestByPath(FIND_MY_STRUCTURES, {
+            filter: s => needsEnergy(s),
+        });
+        if (target)
+            creep.memory.targetId = target.id;
+    }
     if (target) {
         if (creep.transfer(target, RESOURCE_ENERGY) === ERR_NOT_IN_RANGE) {
             creep.moveTo(target, { reusePath: 5 });
         }
     }
+}
+function needsEnergy(s) {
+    if (!s)
+        return false;
+    if (s.structureType === STRUCTURE_EXTENSION)
+        return s.store.getFreeCapacity(RESOURCE_ENERGY) > 0;
+    if (s.structureType === STRUCTURE_SPAWN)
+        return s.store.getFreeCapacity(RESOURCE_ENERGY) > 0;
+    if (s.structureType === STRUCTURE_TOWER)
+        return s.store.getFreeCapacity(RESOURCE_ENERGY) > 200;
+    if (s.structureType === STRUCTURE_STORAGE)
+        return s.store.getFreeCapacity(RESOURCE_ENERGY) > 0;
+    return false;
+}
+// ─── Container cache ──────────────────────────────────────────────────────────
+// Reuses the same container until it runs dry, then re-picks the fullest.
+function getCachedContainer(creep, inRoom) {
+    if (creep.room.name !== inRoom)
+        return null;
+    const cached = creep.memory.targetId
+        ? Game.getObjectById(creep.memory.targetId)
+        : null;
+    if (cached && cached.structureType === STRUCTURE_CONTAINER &&
+        cached.store[RESOURCE_ENERGY] >= 50) {
+        return cached;
+    }
+    // Re-find: pick the fullest container
+    const containers = creep.room.find(FIND_STRUCTURES, {
+        filter: s => s.structureType === STRUCTURE_CONTAINER &&
+            s.store[RESOURCE_ENERGY] >= 50,
+    });
+    if (containers.length === 0) {
+        creep.memory.targetId = undefined;
+        return null;
+    }
+    const best = containers.reduce((a, b) => a.store[RESOURCE_ENERGY] >= b.store[RESOURCE_ENERGY] ? a : b);
+    creep.memory.targetId = best.id;
+    return best;
+}
+function moveToRoom$6(creep, roomName) {
+    // Move toward room center — native pathfinder handles cross-room routing.
+    // reusePath:20 caches the serialized path across ticks; range:23 stops as
+    // soon as we're inside the room (within 23 tiles of center on a 50×50 grid).
+    creep.moveTo(new RoomPosition(25, 25, roomName), { reusePath: 20, range: 23 });
 }
 
 // Dedicated controller upgrader.
@@ -310,11 +456,49 @@ function runBuilder(creep) {
         }
     }
     else {
+        collectEnergy(creep);
+    }
+}
+function collectEnergy(creep) {
+    // Containers filled by stationary harvesters — pick the fullest one
+    const containers = creep.room.find(FIND_STRUCTURES, {
+        filter: s => s.structureType === STRUCTURE_CONTAINER &&
+            s.store[RESOURCE_ENERGY] >= 50,
+    });
+    if (containers.length > 0) {
+        const target = containers.reduce((a, b) => a.store[RESOURCE_ENERGY] >= b.store[RESOURCE_ENERGY] ? a : b);
+        if (creep.withdraw(target, RESOURCE_ENERGY) === ERR_NOT_IN_RANGE) {
+            creep.moveTo(target, { reusePath: 5 });
+        }
+        return;
+    }
+    // Storage as secondary source
+    const storage = creep.room.storage;
+    if (storage && storage.store[RESOURCE_ENERGY] >= 200) {
+        if (creep.withdraw(storage, RESOURCE_ENERGY) === ERR_NOT_IN_RANGE) {
+            creep.moveTo(storage, { reusePath: 5 });
+        }
+        return;
+    }
+    // Dropped energy (tombstones, overflow)
+    const dropped = creep.pos.findClosestByPath(FIND_DROPPED_RESOURCES, {
+        filter: r => r.resourceType === RESOURCE_ENERGY && r.amount >= 50,
+    });
+    if (dropped) {
+        if (creep.pickup(dropped) === ERR_NOT_IN_RANGE) {
+            creep.moveTo(dropped, { reusePath: 3 });
+        }
+        return;
+    }
+    // Bootstrap fallback: before the first container exists, harvest directly so
+    // the builder can build those first containers and unblock the supply chain.
+    const hasContainers = creep.room.find(FIND_STRUCTURES, {
+        filter: s => s.structureType === STRUCTURE_CONTAINER,
+    }).length > 0;
+    if (!hasContainers) {
         const source = creep.pos.findClosestByPath(FIND_SOURCES_ACTIVE);
-        if (source) {
-            if (creep.harvest(source) === ERR_NOT_IN_RANGE) {
-                creep.moveTo(source, { reusePath: 5 });
-            }
+        if (source && creep.harvest(source) === ERR_NOT_IN_RANGE) {
+            creep.moveTo(source, { reusePath: 5 });
         }
     }
 }
@@ -414,9 +598,11 @@ function getEnergy(creep) {
     }
 }
 
-// Scout: patrols adjacent rooms, records rich intel, and waits at home when
-// all rooms are fresh. Clears targetRoomName when idle to prevent bouncing.
-const STALE_TICKS = 500;
+// Scout: patrols every room adjacent to any owned room.
+// Rooms bordering owned territory are rescanned every BORDER_STALE_TICKS (100)
+// for early-warning purposes. Other room types use the standard STALE_TICKS (500).
+// Clears targetRoomName when all rooms are fresh to prevent idle bouncing.
+const BORDER_STALE_TICKS = 100; // frequent rescan near our borders for early warning
 function runScout(creep) {
     const targetRoom = creep.memory.targetRoomName;
     if (!targetRoom) {
@@ -456,43 +642,65 @@ function recordRoomIntel(room) {
         controllerOwned: !!((_a = room.controller) === null || _a === void 0 ? void 0 : _a.owner),
         sourceCount: room.find(FIND_SOURCES).length,
     };
-    Memory.scoutTick = Game.time;
-    if (enemySpawns > 0 || enemyCreeps > 0) {
-        const currentStrength = Memory.enemyRoomName
-            ? ((_c = (_b = Memory.roomIntel[Memory.enemyRoomName]) === null || _b === void 0 ? void 0 : _b.strength) !== null && _c !== void 0 ? _c : Infinity)
-            : Infinity;
-        if (strength < currentStrength) {
-            Memory.enemyRoomName = room.name;
-            Memory.enemyStrength = strength;
+    // Update every owned room's per-room scoutTick and enemyRoomName so each
+    // room's strategy FSM can independently decide whether to RUSH or DEFEND.
+    const ownedRooms = Object.values(Game.rooms).filter(r => { var _a; return (_a = r.controller) === null || _a === void 0 ? void 0 : _a.my; });
+    for (const owned of ownedRooms) {
+        owned.memory.scoutTick = Game.time;
+        if (enemySpawns > 0 || enemyCreeps > 0) {
+            const currentStrength = owned.memory.enemyRoomName
+                ? ((_c = (_b = Memory.roomIntel[owned.memory.enemyRoomName]) === null || _b === void 0 ? void 0 : _b.strength) !== null && _c !== void 0 ? _c : Infinity)
+                : Infinity;
+            if (strength < currentStrength) {
+                owned.memory.enemyRoomName = room.name;
+                owned.memory.enemyStrength = strength;
+            }
         }
     }
-    console.log(`[adaptive] Scout intel: ${room.name} str=${strength} ctrl=${!!room.controller} owned=${!!((_d = room.controller) === null || _d === void 0 ? void 0 : _d.owner)} sources=${room.find(FIND_SOURCES).length}`);
+    console.log(`[scout] ${room.name} str=${strength} ctrl=${!!room.controller} owned=${!!((_d = room.controller) === null || _d === void 0 ? void 0 : _d.owner)} sources=${room.find(FIND_SOURCES).length}`);
 }
 function assignNextTarget(creep) {
-    var _a, _b;
-    const homeRoom = Object.values(Game.rooms).find(r => { var _a; return (_a = r.controller) === null || _a === void 0 ? void 0 : _a.my; });
-    if (!homeRoom)
+    var _a;
+    const ownedRooms = Object.values(Game.rooms).filter(r => { var _a; return (_a = r.controller) === null || _a === void 0 ? void 0 : _a.my; });
+    if (ownedRooms.length === 0)
         return;
-    const exits = Game.map.describeExits(homeRoom.name);
-    if (!exits)
-        return;
-    const exitRooms = Object.values(exits).filter((r) => !!r);
-    const intel = (_a = Memory.roomIntel) !== null && _a !== void 0 ? _a : {};
-    const target = (_b = exitRooms.find(r => !intel[r])) !== null && _b !== void 0 ? _b : exitRooms.find(r => intel[r] && Game.time - intel[r].scannedAt > STALE_TICKS);
-    if (target) {
-        creep.memory.targetRoomName = target;
-        creep.memory.scoutComplete = false;
+    // Collect all rooms adjacent to ANY owned room (excluding owned rooms themselves)
+    const ownedNames = new Set(ownedRooms.map(r => r.name));
+    const borderRooms = new Set();
+    for (const room of ownedRooms) {
+        const exits = Game.map.describeExits(room.name);
+        if (!exits)
+            continue;
+        for (const neighbor of Object.values(exits)) {
+            if (neighbor && !ownedNames.has(neighbor))
+                borderRooms.add(neighbor);
+        }
     }
-    else {
-        // All rooms are fresh — clear target and wait at home to prevent bouncing
-        creep.memory.targetRoomName = undefined;
-        if (creep.room.name !== homeRoom.name) {
-            const exitDir = creep.room.findExitTo(homeRoom.name);
-            if (exitDir !== ERR_NO_PATH && exitDir !== ERR_INVALID_ARGS) {
-                const exit = creep.pos.findClosestByRange(exitDir);
-                if (exit)
-                    creep.moveTo(exit, { reusePath: 5 });
-            }
+    const intel = (_a = Memory.roomIntel) !== null && _a !== void 0 ? _a : {};
+    const targets = Array.from(borderRooms);
+    // Priority 1: rooms never scanned before
+    const unscanned = targets.find(r => !intel[r]);
+    if (unscanned) {
+        creep.memory.targetRoomName = unscanned;
+        creep.memory.scoutComplete = false;
+        return;
+    }
+    // Priority 2: stale border rooms (early-warning rescan at 100 ticks)
+    const staleBorder = targets.find(r => { var _a, _b; return Game.time - ((_b = (_a = intel[r]) === null || _a === void 0 ? void 0 : _a.scannedAt) !== null && _b !== void 0 ? _b : 0) > BORDER_STALE_TICKS; });
+    if (staleBorder) {
+        creep.memory.targetRoomName = staleBorder;
+        creep.memory.scoutComplete = false;
+        return;
+    }
+    // All rooms fresh — wait in the first owned room to avoid pointless travel
+    creep.memory.targetRoomName = undefined;
+    const homeRoom = ownedRooms[0];
+    if (creep.room.name !== homeRoom.name) {
+        const exitDir = creep.room.findExitTo(homeRoom.name);
+        if (exitDir !== ERR_NO_PATH && exitDir !== ERR_INVALID_ARGS) {
+            const exit = creep.pos.findClosestByRange(exitDir);
+            if (exit)
+                creep.moveTo(exit, { reusePath: 5 });
         }
     }
 }
@@ -534,21 +742,291 @@ function runClaimer(creep) {
     }
 }
 
-// Advanced combat unit replacing basic attacker.
-// Has HEAL parts, retreat logic, and obeys the global RALLY/MARCH/ENGAGE state.
-const RETREAT_THRESHOLD = 0.3; // retreat when HP falls below 30%
-function runWarrior(creep) {
+// Reserver: keeps a neutral adjacent room's controller reserved so no one else can claim it.
+// Reservation costs 1 CLAIM part and lasts up to 5000 ticks (refreshed each call).
+// Reserved rooms cannot be claimed by other players — they remain neutral so we can
+// harvest their sources without spending a GCL slot.
+//
+// creep.memory.targetRoomName — room whose controller to reserve
+function runReserver(creep) {
+    const target = creep.memory.targetRoomName;
+    if (!target)
+        return;
+    if (creep.room.name !== target) {
+        moveToRoom$5(creep, target);
+        return;
+    }
+    const ctrl = creep.room.controller;
+    if (!ctrl)
+        return;
+    // Already claimed by us — shouldn't happen but handle gracefully
+    if (ctrl.my)
+        return;
+    // Reserving: each call with CLAIM+MOVE adds 600t to reservation (cap 5000t)
+    const result = creep.reserveController(ctrl);
+    if (result === ERR_NOT_IN_RANGE) {
+        creep.moveTo(ctrl, { reusePath: 10 });
+    }
+}
+function moveToRoom$5(creep, roomName) {
+    const exitDir = creep.room.findExitTo(roomName);
+    if (exitDir !== ERR_NO_PATH && exitDir !== ERR_INVALID_ARGS) {
+        const exit = creep.pos.findClosestByRange(exitDir);
+        if (exit)
+            creep.moveTo(exit, { reusePath: 5 });
+    }
+}
+
+// Scavenger: fast creep that collects dropped energy and tombstones.
+// Works in own room first; if a scavengeRoom is set and own room is clear,
+// crosses into that room to loot (safe-mode rooms included — can enter, just can't attack).
+// Returns home and deposits into storage, containers, or spawns.
+const MIN_LOOT_AMOUNT = 30; // ignore tiny piles not worth the trip
+function runScavenger(creep) {
+    if (creep.memory.working && creep.store[RESOURCE_ENERGY] === 0) {
+        creep.memory.working = false;
+    }
+    if (!creep.memory.working && creep.store.getFreeCapacity() === 0) {
+        creep.memory.working = true;
+    }
+    if (creep.memory.working) {
+        deposit(creep);
+    }
+    else {
+        loot(creep);
+    }
+}
+function loot(creep) {
+    // 1. Tombstones in current room (highest priority — about to vanish)
+    const tombstone = creep.pos.findClosestByPath(FIND_TOMBSTONES, {
+        filter: t => t.store[RESOURCE_ENERGY] >= MIN_LOOT_AMOUNT,
+    });
+    if (tombstone) {
+        if (creep.withdraw(tombstone, RESOURCE_ENERGY) === ERR_NOT_IN_RANGE) {
+            creep.moveTo(tombstone, { reusePath: 3 });
+        }
+        return;
+    }
+    // 2. Dropped energy in current room
+    const dropped = creep.pos.findClosestByPath(FIND_DROPPED_RESOURCES, {
+        filter: r => r.resourceType === RESOURCE_ENERGY && r.amount >= MIN_LOOT_AMOUNT,
+    });
+    if (dropped) {
+        if (creep.pickup(dropped) === ERR_NOT_IN_RANGE) {
+            creep.moveTo(dropped, { reusePath: 3 });
+        }
+        return;
+    }
+    // 3. Nothing in current room — if a scavenge target room is set, go there
+    const scavengeRoom = creep.memory.scavengeRoom;
+    if (scavengeRoom && creep.room.name !== scavengeRoom) {
+        moveToRoom$4(creep, scavengeRoom);
+        return;
+    }
+    // 4. In the scavenge room — pick up anything there too
+    if (scavengeRoom && creep.room.name === scavengeRoom) {
+        const remoteDropped = creep.pos.findClosestByPath(FIND_DROPPED_RESOURCES, {
+            filter: r => r.resourceType === RESOURCE_ENERGY && r.amount >= MIN_LOOT_AMOUNT,
+        });
+        if (remoteDropped) {
+            if (creep.pickup(remoteDropped) === ERR_NOT_IN_RANGE) {
+                creep.moveTo(remoteDropped, { reusePath: 3 });
+            }
+            return;
+        }
+        const remoteTombstone = creep.pos.findClosestByPath(FIND_TOMBSTONES, {
+            filter: t => t.store[RESOURCE_ENERGY] >= MIN_LOOT_AMOUNT,
+        });
+        if (remoteTombstone) {
+            if (creep.withdraw(remoteTombstone, RESOURCE_ENERGY) === ERR_NOT_IN_RANGE) {
+                creep.moveTo(remoteTombstone, { reusePath: 3 });
+            }
+            return;
+        }
+        // Remote room is clean — return home
+        travelHome$3(creep);
+        return;
+    }
+    // 5. Nothing to loot anywhere — idle near spawn
+    if (!isHome$3(creep)) {
+        travelHome$3(creep);
+        return;
+    }
+    const spawn = creep.pos.findClosestByPath(FIND_MY_SPAWNS);
+    if (spawn)
+        creep.moveTo(spawn, { reusePath: 10 });
+}
+function deposit(creep) {
+    if (!isHome$3(creep)) {
+        travelHome$3(creep);
+        return;
+    }
+    // Prefer storage (large buffer), then containers, then spawn/extensions
+    const storage = creep.room.storage;
+    if (storage && storage.store.getFreeCapacity(RESOURCE_ENERGY) > 0) {
+        if (creep.transfer(storage, RESOURCE_ENERGY) === ERR_NOT_IN_RANGE) {
+            creep.moveTo(storage, { reusePath: 5 });
+        }
+        return;
+    }
+    const container = creep.pos.findClosestByPath(FIND_STRUCTURES, {
+        filter: s => s.structureType === STRUCTURE_CONTAINER &&
+            s.store.getFreeCapacity(RESOURCE_ENERGY) > 0,
+    });
+    if (container) {
+        if (creep.transfer(container, RESOURCE_ENERGY) === ERR_NOT_IN_RANGE) {
+            creep.moveTo(container, { reusePath: 5 });
+        }
+        return;
+    }
+    const fillTarget = creep.pos.findClosestByPath(FIND_MY_STRUCTURES, {
+        filter: (s) => (s.structureType === STRUCTURE_SPAWN || s.structureType === STRUCTURE_EXTENSION) &&
+            s.store.getFreeCapacity(RESOURCE_ENERGY) > 0,
+    });
+    if (fillTarget) {
+        if (creep.transfer(fillTarget, RESOURCE_ENERGY) === ERR_NOT_IN_RANGE) {
+            creep.moveTo(fillTarget, { reusePath: 5 });
+        }
+    }
+}
+function isHome$3(creep) {
+    var _a, _b;
+    const home = creep.memory.homeRoom;
+    if (home)
+        return creep.room.name === home;
+    return !!((_b = (_a = Game.rooms[creep.room.name]) === null || _a === void 0 ? void 0 : _a.controller) === null || _b === void 0 ? void 0 : _b.my);
+}
+function travelHome$3(creep) {
     var _a;
+    const dest = (_a = creep.memory.homeRoom) !== null && _a !== void 0 ? _a : Object.keys(Game.rooms).find(r => { var _a, _b; return (_b = (_a = Game.rooms[r]) === null || _a === void 0 ? void 0 : _a.controller) === null || _b === void 0 ? void 0 : _b.my; });
+    if (dest)
+        moveToRoom$4(creep, dest);
+}
+function moveToRoom$4(creep, roomName) {
+    const exitDir = creep.room.findExitTo(roomName);
+    if (exitDir !== ERR_NO_PATH && exitDir !== ERR_INVALID_ARGS) {
+        const exit = creep.pos.findClosestByRange(exitDir);
+        if (exit)
+            creep.moveTo(exit, { reusePath: 3 });
+    }
+}
+
+// Courier: physically carries energy from a surplus room to a deficit room.
+// Used before RCL 6 (no terminals). At RCL 6+, transferManager switches to
+// terminal transfers and couriers are no longer spawned.
+//
+// creep.memory.homeRoom    — source room (where to withdraw energy)
+// creep.memory.courierTarget — destination room (where to deposit energy)
+function runCourier(creep) {
+    if (creep.memory.working && creep.store[RESOURCE_ENERGY] === 0) {
+        creep.memory.working = false;
+    }
+    if (!creep.memory.working && creep.store.getFreeCapacity() === 0) {
+        creep.memory.working = true;
+    }
+    if (creep.memory.working) {
+        deliver(creep);
+    }
+    else {
+        collect(creep);
+    }
+}
+function collect(creep) {
+    const homeRoom = creep.memory.homeRoom;
+    if (!homeRoom)
+        return;
+    if (creep.room.name !== homeRoom) {
+        moveToRoom$3(creep, homeRoom);
+        return;
+    }
+    // Withdraw from storage first, then fullest container
+    const storage = creep.room.storage;
+    if (storage && storage.store[RESOURCE_ENERGY] >= 500) {
+        if (creep.withdraw(storage, RESOURCE_ENERGY) === ERR_NOT_IN_RANGE) {
+            creep.moveTo(storage, { reusePath: 5 });
+        }
+        return;
+    }
+    const container = creep.pos.findClosestByPath(FIND_STRUCTURES, {
+        filter: s => s.structureType === STRUCTURE_CONTAINER &&
+            s.store[RESOURCE_ENERGY] >= 200,
+    });
+    if (container) {
+        if (creep.withdraw(container, RESOURCE_ENERGY) === ERR_NOT_IN_RANGE) {
+            creep.moveTo(container, { reusePath: 5 });
+        }
+        return;
+    }
+    // Source room has no energy to spare — idle near storage
+    if (storage)
+        creep.moveTo(storage, { reusePath: 10 });
+}
+function deliver(creep) {
+    const target = creep.memory.courierTarget;
+    if (!target)
+        return;
+    if (creep.room.name !== target) {
+        moveToRoom$3(creep, target);
+        return;
+    }
+    // Deposit into spawn/extensions first (keep spawn capacity up), then storage/containers
+    const spawnTarget = creep.pos.findClosestByPath(FIND_MY_STRUCTURES, {
+        filter: (s) => (s.structureType === STRUCTURE_SPAWN || s.structureType === STRUCTURE_EXTENSION) &&
+            s.store.getFreeCapacity(RESOURCE_ENERGY) > 0,
+    });
+    if (spawnTarget) {
+        if (creep.transfer(spawnTarget, RESOURCE_ENERGY) === ERR_NOT_IN_RANGE) {
+            creep.moveTo(spawnTarget, { reusePath: 5 });
+        }
+        return;
+    }
+    const destStorage = creep.room.storage;
+    if (destStorage && destStorage.store.getFreeCapacity(RESOURCE_ENERGY) > 0) {
+        if (creep.transfer(destStorage, RESOURCE_ENERGY) === ERR_NOT_IN_RANGE) {
+            creep.moveTo(destStorage, { reusePath: 5 });
+        }
+        return;
+    }
+    const container = creep.pos.findClosestByPath(FIND_STRUCTURES, {
+        filter: s => s.structureType === STRUCTURE_CONTAINER &&
+            s.store.getFreeCapacity(RESOURCE_ENERGY) > 0,
+    });
+    if (container) {
+        if (creep.transfer(container, RESOURCE_ENERGY) === ERR_NOT_IN_RANGE) {
+            creep.moveTo(container, { reusePath: 5 });
+        }
+    }
+}
+function moveToRoom$3(creep, roomName) {
+    const exitDir = creep.room.findExitTo(roomName);
+    if (exitDir !== ERR_NO_PATH && exitDir !== ERR_INVALID_ARGS) {
+        const exit = creep.pos.findClosestByRange(exitDir);
+        if (exit)
+            creep.moveTo(exit, { reusePath: 3 });
+    }
+}
+
+// Advanced combat unit.
+// Has HEAL parts, retreat logic, and obeys per-room RALLY/MARCH/ENGAGE state.
+// When assigned to a quad, uses quad-coordinated target ID (set by quadManager).
+const RETREAT_THRESHOLD = 0.3;
+function runWarrior(creep) {
+    var _a, _b;
     // Always try to heal self if damaged (HEAL action is independent of movement)
     if (creep.hits < creep.hitsMax) {
         creep.heal(creep);
     }
     // Retreat when critically wounded — return home to recover
     if (creep.hits < creep.hitsMax * RETREAT_THRESHOLD) {
-        retreatToSpawn(creep);
+        retreatToHome(creep);
         return;
     }
-    const combatState = (_a = Memory.combatState) !== null && _a !== void 0 ? _a : 'RALLY';
+    const homeMemory = creep.memory.homeRoom ? (_a = Game.rooms[creep.memory.homeRoom]) === null || _a === void 0 ? void 0 : _a.memory : undefined;
+    const combatState = (_b = homeMemory === null || homeMemory === void 0 ? void 0 : homeMemory.combatState) !== null && _b !== void 0 ? _b : 'RALLY';
+    if (combatState === 'RALLY' && creep.memory.defendingRoom) {
+        defendRoom$1(creep);
+        return;
+    }
     switch (combatState) {
         case 'RALLY':
             rallyAtSpawn$1(creep);
@@ -559,14 +1037,23 @@ function runWarrior(creep) {
             break;
     }
 }
+function defendRoom$1(creep) {
+    const target = creep.memory.defendingRoom;
+    if (creep.room.name !== target) {
+        moveToRoom$2(creep, target);
+        return;
+    }
+    engageInRoom(creep);
+}
 function executeMarch$1(creep) {
-    var _a;
+    var _a, _b;
     const pid = creep.memory.platoonId;
-    const orders = pid ? (_a = Memory.platoonOrders) === null || _a === void 0 ? void 0 : _a[pid] : undefined;
+    const homeMemory = creep.memory.homeRoom ? (_a = Game.rooms[creep.memory.homeRoom]) === null || _a === void 0 ? void 0 : _a.memory : undefined;
+    const orders = pid ? (_b = homeMemory === null || homeMemory === void 0 ? void 0 : homeMemory.platoonOrders) === null || _b === void 0 ? void 0 : _b[pid] : undefined;
     const targetRoom = creep.memory.targetRoomName;
     // FEINT: after the feint window expires, fall back home
     if ((orders === null || orders === void 0 ? void 0 : orders.tactic) === 'FEINT' && orders.feintEndTick && Game.time > orders.feintEndTick) {
-        retreatToSpawn(creep);
+        retreatToHome(creep);
         return;
     }
     // MAIN: hold at home until engageTick — let the feint platoon draw fire first
@@ -605,7 +1092,7 @@ function rallyAtSpawn$1(creep) {
         creep.moveTo(target, { reusePath: 5 });
     }
 }
-function retreatToSpawn(creep) {
+function retreatToHome(creep) {
     if (!isHome$2(creep)) {
         travelHome$2(creep);
         return;
@@ -665,21 +1152,24 @@ function stagingArea$2(room, spawn) {
 }
 function isHome$2(creep) {
     var _a, _b;
-    return !!((_b = (_a = Game.rooms[creep.room.name]) === null || _a === void 0 ? void 0 : _a.controller) === null || _b === void 0 ? void 0 : _b.my);
+    const home = creep.memory.homeRoom;
+    if (home)
+        return creep.room.name === home;
+    return !!((_b = (_a = Game.rooms[creep.room.name]) === null || _a === void 0 ? void 0 : _a.controller) === null || _b === void 0 ? void 0 : _b.my); // fallback for legacy creeps
 }
 function travelHome$2(creep) {
-    const homeRoom = Object.keys(Game.rooms).find(r => { var _a; return (_a = Game.rooms[r].controller) === null || _a === void 0 ? void 0 : _a.my; });
-    if (!homeRoom)
-        return;
-    const exitDir = creep.room.findExitTo(homeRoom);
-    if (exitDir !== ERR_NO_PATH && exitDir !== ERR_INVALID_ARGS) {
-        const exit = creep.pos.findClosestByRange(exitDir);
-        if (exit)
-            creep.moveTo(exit, { reusePath: 3 });
-    }
+    var _a;
+    const dest = (_a = creep.memory.homeRoom) !== null && _a !== void 0 ? _a : Object.keys(Game.rooms).find(r => { var _a, _b; return (_b = (_a = Game.rooms[r]) === null || _a === void 0 ? void 0 : _a.controller) === null || _b === void 0 ? void 0 : _b.my; });
+    if (dest)
+        moveToRoom$2(creep, dest);
 }
 function engageInRoom(creep) {
-    const target = findCombatTarget(creep);
+    var _a;
+    // Quad-coordinated target takes priority (set by quadManager)
+    const quadTarget = creep.memory.targetId
+        ? Game.getObjectById(creep.memory.targetId)
+        : null;
+    const target = (_a = quadTarget) !== null && _a !== void 0 ? _a : findCombatTarget(creep);
     if (!target) {
         // Patrol center — there may be nothing left to attack
         creep.moveTo(new RoomPosition(25, 25, creep.room.name), { reusePath: 10 });
@@ -730,7 +1220,7 @@ function moveToRoom$2(creep, roomName) {
 const RETREAT_HP = 0.25;
 const KITE_RANGE = 3; // ideal engagement distance
 function runRanger(creep) {
-    var _a;
+    var _a, _b;
     if (creep.hits < creep.hitsMax) {
         creep.heal(creep); // HEAL is a separate action, always fires
     }
@@ -738,7 +1228,12 @@ function runRanger(creep) {
         retreat(creep);
         return;
     }
-    const combatState = (_a = Memory.combatState) !== null && _a !== void 0 ? _a : 'RALLY';
+    const homeMemory = creep.memory.homeRoom ? (_a = Game.rooms[creep.memory.homeRoom]) === null || _a === void 0 ? void 0 : _a.memory : undefined;
+    const combatState = (_b = homeMemory === null || homeMemory === void 0 ? void 0 : homeMemory.combatState) !== null && _b !== void 0 ? _b : 'RALLY';
+    if (combatState === 'RALLY' && creep.memory.defendingRoom) {
+        defendRoom(creep);
+        return;
+    }
     switch (combatState) {
         case 'RALLY':
             rally(creep);
@@ -749,14 +1244,26 @@ function runRanger(creep) {
             break;
     }
 }
+function defendRoom(creep) {
+    const target = creep.memory.defendingRoom;
+    if (creep.room.name !== target) {
+        moveToRoom$1(creep, target);
+        return;
+    }
+    engage(creep);
+}
 function engage(creep) {
+    var _a;
     const nearbyEnemies = creep.pos.findInRange(FIND_HOSTILE_CREEPS, KITE_RANGE);
-    // Use mass attack when 3+ enemies are clustered (hits all in 3-tile AoE)
     if (nearbyEnemies.length >= 3) {
         creep.rangedMassAttack();
         return;
     }
-    const target = findTarget(creep);
+    // Quad-coordinated target takes priority
+    const quadTarget = creep.memory.targetId
+        ? Game.getObjectById(creep.memory.targetId)
+        : null;
+    const target = (_a = quadTarget) !== null && _a !== void 0 ? _a : findTarget(creep);
     if (!target) {
         creep.moveTo(new RoomPosition(25, 25, creep.room.name), { reusePath: 10 });
         return;
@@ -791,9 +1298,10 @@ function findTarget(creep) {
     return creep.pos.findClosestByPath(FIND_HOSTILE_STRUCTURES);
 }
 function executeMarch(creep) {
-    var _a;
+    var _a, _b;
     const pid = creep.memory.platoonId;
-    const orders = pid ? (_a = Memory.platoonOrders) === null || _a === void 0 ? void 0 : _a[pid] : undefined;
+    const homeMemory = creep.memory.homeRoom ? (_a = Game.rooms[creep.memory.homeRoom]) === null || _a === void 0 ? void 0 : _a.memory : undefined;
+    const orders = pid ? (_b = homeMemory === null || homeMemory === void 0 ? void 0 : homeMemory.platoonOrders) === null || _b === void 0 ? void 0 : _b[pid] : undefined;
     const targetRoom = creep.memory.targetRoomName;
     if ((orders === null || orders === void 0 ? void 0 : orders.tactic) === 'FEINT' && orders.feintEndTick && Game.time > orders.feintEndTick) {
         retreat(creep);
@@ -882,18 +1390,16 @@ function stagingArea$1(room, spawn) {
 }
 function isHome$1(creep) {
     var _a, _b;
+    const home = creep.memory.homeRoom;
+    if (home)
+        return creep.room.name === home;
     return !!((_b = (_a = Game.rooms[creep.room.name]) === null || _a === void 0 ? void 0 : _a.controller) === null || _b === void 0 ? void 0 : _b.my);
 }
 function travelHome$1(creep) {
-    const homeRoom = Object.keys(Game.rooms).find(r => { var _a; return (_a = Game.rooms[r].controller) === null || _a === void 0 ? void 0 : _a.my; });
-    if (!homeRoom)
-        return;
-    const exitDir = creep.room.findExitTo(homeRoom);
-    if (exitDir !== ERR_NO_PATH && exitDir !== ERR_INVALID_ARGS) {
-        const exit = creep.pos.findClosestByRange(exitDir);
-        if (exit)
-            creep.moveTo(exit, { reusePath: 3 });
-    }
+    var _a;
+    const dest = (_a = creep.memory.homeRoom) !== null && _a !== void 0 ? _a : Object.keys(Game.rooms).find(r => { var _a, _b; return (_b = (_a = Game.rooms[r]) === null || _a === void 0 ? void 0 : _a.controller) === null || _b === void 0 ? void 0 : _b.my; });
+    if (dest)
+        moveToRoom$1(creep, dest);
 }
 function moveToRoom$1(creep, roomName) {
     const exitDir = creep.room.findExitTo(roomName);
@@ -916,22 +1422,32 @@ function getDirection(dx, dy) {
 // Healer: attached to a platoon via creep.memory.platoonId.
 // Follows platoon orders (same as warrior/ranger): respects FEINT timing,
 // MAIN hold-and-wait, FLANK waypoints. Then heals the most wounded ally.
-// All platoons share Memory.combatState so they march and engage in concert.
+// Reads combat state from homeRoom.memory.combatState (per-room FSM).
 const HEAL_THRESHOLD = 0.85;
 function runHealer(creep) {
-    var _a, _b;
+    var _a, _b, _c;
     // Self-heal always fires independently
     if (creep.hits < creep.hitsMax) {
         creep.heal(creep);
     }
-    const combatState = (_a = Memory.combatState) !== null && _a !== void 0 ? _a : 'RALLY';
+    const homeMemory = creep.memory.homeRoom ? (_a = Game.rooms[creep.memory.homeRoom]) === null || _a === void 0 ? void 0 : _a.memory : undefined;
+    const combatState = (_b = homeMemory === null || homeMemory === void 0 ? void 0 : homeMemory.combatState) !== null && _b !== void 0 ? _b : 'RALLY';
     if (combatState === 'RALLY') {
+        if (creep.memory.defendingRoom) {
+            const target = creep.memory.defendingRoom;
+            if (creep.room.name !== target) {
+                moveToRoom(creep, target);
+                return;
+            }
+            healPlatoon(creep);
+            return;
+        }
         rallyAtSpawn(creep);
         return;
     }
     // MARCH or ENGAGE — follow the platoon's assigned route
     const pid = creep.memory.platoonId;
-    const orders = pid ? (_b = Memory.platoonOrders) === null || _b === void 0 ? void 0 : _b[pid] : undefined;
+    const orders = pid ? (_c = homeMemory === null || homeMemory === void 0 ? void 0 : homeMemory.platoonOrders) === null || _c === void 0 ? void 0 : _c[pid] : undefined;
     const targetRoom = creep.memory.targetRoomName;
     // MAIN tactic: hold home until the feint platoon has drawn fire
     if ((orders === null || orders === void 0 ? void 0 : orders.tactic) === 'MAIN' && orders.engageTick && Game.time < orders.engageTick) {
@@ -1042,18 +1558,16 @@ function stagingArea(room, spawn) {
 }
 function isHome(creep) {
     var _a, _b;
+    const home = creep.memory.homeRoom;
+    if (home)
+        return creep.room.name === home;
     return !!((_b = (_a = Game.rooms[creep.room.name]) === null || _a === void 0 ? void 0 : _a.controller) === null || _b === void 0 ? void 0 : _b.my);
 }
 function travelHome(creep) {
-    const homeRoom = Object.keys(Game.rooms).find(r => { var _a; return (_a = Game.rooms[r].controller) === null || _a === void 0 ? void 0 : _a.my; });
-    if (!homeRoom)
-        return;
-    const exitDir = creep.room.findExitTo(homeRoom);
-    if (exitDir !== ERR_NO_PATH && exitDir !== ERR_INVALID_ARGS) {
-        const exit = creep.pos.findClosestByRange(exitDir);
-        if (exit)
-            creep.moveTo(exit, { reusePath: 3 });
-    }
+    var _a;
+    const dest = (_a = creep.memory.homeRoom) !== null && _a !== void 0 ? _a : Object.keys(Game.rooms).find(r => { var _a, _b; return (_b = (_a = Game.rooms[r]) === null || _a === void 0 ? void 0 : _a.controller) === null || _b === void 0 ? void 0 : _b.my; });
+    if (dest)
+        moveToRoom(creep, dest);
 }
 function moveToRoom(creep, roomName) {
     const exitDir = creep.room.findExitTo(roomName);
@@ -1064,108 +1578,210 @@ function moveToRoom(creep, roomName) {
     }
 }
 
-const ECONOMY_CREEP_TARGET = 5;
-const RUSH_STRENGTH_THRESHOLD = 10;
-const REASSESS_COOLDOWN = 500;
+const ECONOMY_CREEP_TARGET = 3; // start scouting at 3 creeps, not 5
+const RUSH_STRENGTH_THRESHOLD = 30; // attack enemies up to this strength (was 10)
+const OPPORTUNISTIC_THRESHOLD = 15; // attack immediately without full ASSESS if this weak
+const REASSESS_COOLDOWN = 100; // ticks between re-assess attempts (was 500)
 const RUSH_TIMEOUT = 2000;
-// When safe mode has this many ticks left, start building up combat for what comes after
 const SAFE_MODE_PREPARE_TICKS = 2000;
+// How fresh intel must be to act on it for an attack
+const MAX_ATTACK_INTEL_AGE = 500;
 function updatePhase(room) {
     var _a, _b, _c;
     // ── Safe mode override ────────────────────────────────────────────────────
-    // During safe mode enemies can't attack us. Use the window for pure economy.
-    // When safe mode is nearly up, transition to ASSESS so we start scouting + building army.
     const safeMode = (_b = (_a = room.controller) === null || _a === void 0 ? void 0 : _a.safeMode) !== null && _b !== void 0 ? _b : 0;
     if (safeMode > 0) {
-        if (Memory.phase !== 'ECONOMY') {
-            Memory.phase = 'ECONOMY';
-            console.log(`[adaptive] Safe mode active (${safeMode} ticks left) → forcing ECONOMY`);
+        if (room.memory.phase !== 'ECONOMY') {
+            room.memory.phase = 'ECONOMY';
+            console.log(`[${room.name}] Safe mode active (${safeMode}t left) → forcing ECONOMY`);
         }
-        if (safeMode < SAFE_MODE_PREPARE_TICKS && Memory.phase === 'ECONOMY') {
-            Memory.phase = 'ASSESS';
-            Memory.scoutTick = undefined;
-            console.log('[adaptive] Safe mode expiring soon → ASSESS (build for what comes next)');
+        if (safeMode < SAFE_MODE_PREPARE_TICKS && room.memory.phase === 'ECONOMY') {
+            room.memory.phase = 'ASSESS';
+            room.memory.scoutTick = undefined;
+            console.log(`[${room.name}] Safe mode expiring → ASSESS`);
         }
-        return; // skip normal phase logic while safe mode is active
+        return;
     }
-    // ── Normal phase machine ─────────────────────────────────────────────────
-    const phase = (_c = Memory.phase) !== null && _c !== void 0 ? _c : 'ECONOMY';
+    const phase = (_c = room.memory.phase) !== null && _c !== void 0 ? _c : 'ECONOMY';
     if (!Memory.roomIntel)
         Memory.roomIntel = {};
     const myCreeps = room.find(FIND_MY_CREEPS).length;
     switch (phase) {
         case 'ECONOMY': {
-            const cooldownDone = !Memory.phaseTick || Game.time >= Memory.phaseTick;
-            if (myCreeps >= ECONOMY_CREEP_TARGET && cooldownDone) {
-                Memory.phase = 'ASSESS';
-                Memory.phaseTick = Game.time;
-                Memory.scoutTick = undefined;
-                console.log(`[adaptive] → ASSESS at tick ${Game.time}`);
+            const cooldownDone = !room.memory.phaseTick || Game.time >= room.memory.phaseTick;
+            if (!cooldownDone)
+                break;
+            // Opportunistic attack: if we can see a juicy weak target, skip ASSESS and RUSH now.
+            // This is how we attack unprovoked — we don't wait to be threatened.
+            if (myCreeps >= ECONOMY_CREEP_TARGET) {
+                const weak = findBestTarget(room, OPPORTUNISTIC_THRESHOLD);
+                if (weak) {
+                    room.memory.phase = 'RUSH';
+                    room.memory.phaseTick = Game.time;
+                    room.memory.combatState = 'RALLY';
+                    room.memory.enemyRoomName = weak.name;
+                    room.memory.enemyStrength = weak.strength;
+                    console.log(`[${room.name}] → RUSH opportunistic (${weak.name} str=${weak.strength} val=${weak.value})`);
+                    break;
+                }
+                // Otherwise transition to ASSESS to send scout
+                room.memory.phase = 'ASSESS';
+                room.memory.phaseTick = Game.time;
+                room.memory.scoutTick = undefined;
+                console.log(`[${room.name}] → ASSESS at tick ${Game.time}`);
             }
             break;
         }
         case 'ASSESS':
-            if (Memory.scoutTick !== undefined) {
-                if (Memory.enemyRoomName && Memory.enemyStrength !== undefined && Memory.enemyStrength > 0) {
-                    Memory.phase = Memory.enemyStrength <= RUSH_STRENGTH_THRESHOLD ? 'RUSH' : 'DEFEND';
-                    Memory.phaseTick = Game.time;
-                    console.log(`[adaptive] → ${Memory.phase} (enemy strength ${Memory.enemyStrength} in ${Memory.enemyRoomName})`);
+            if (room.memory.scoutTick !== undefined) {
+                const target = findBestTarget(room, RUSH_STRENGTH_THRESHOLD);
+                if (target) {
+                    room.memory.phase = 'RUSH';
+                    room.memory.phaseTick = Game.time;
+                    room.memory.enemyRoomName = target.name;
+                    room.memory.enemyStrength = target.strength;
+                    console.log(`[${room.name}] → RUSH (${target.name} str=${target.strength} val=${target.value})`);
                 }
                 else {
-                    Memory.phase = 'ECONOMY';
-                    Memory.phaseTick = Game.time + REASSESS_COOLDOWN;
-                    console.log(`[adaptive] → ECONOMY (no enemies, re-assess at tick ${Memory.phaseTick})`);
+                    // No viable target found — check if any strong enemy needs defending against
+                    const strong = findStrongestThreat();
+                    if (strong) {
+                        room.memory.phase = 'DEFEND';
+                        room.memory.phaseTick = Game.time;
+                        room.memory.enemyRoomName = strong.name;
+                        room.memory.enemyStrength = strong.strength;
+                        console.log(`[${room.name}] → DEFEND (${strong.name} str=${strong.strength})`);
+                    }
+                    else {
+                        room.memory.phase = 'ECONOMY';
+                        room.memory.phaseTick = Game.time + REASSESS_COOLDOWN;
+                        console.log(`[${room.name}] → ECONOMY (no viable targets, reassess at ${room.memory.phaseTick})`);
+                    }
                 }
             }
             break;
         case 'RUSH': {
             const combatUnits = room.find(FIND_MY_CREEPS, {
-                filter: c => c.memory.role === 'warrior' || c.memory.role === 'ranger',
+                filter: c => (c.memory.role === 'warrior' || c.memory.role === 'ranger') &&
+                    c.memory.homeRoom === room.name,
             }).length;
-            const enemyIntel = Memory.enemyRoomName ? Memory.roomIntel[Memory.enemyRoomName] : undefined;
-            if (enemyIntel && enemyIntel.strength === 0 && Game.time - enemyIntel.scannedAt < 100) {
-                console.log(`[adaptive] → ECONOMY (RUSH succeeded — ${Memory.enemyRoomName} cleared)`);
-                resetToEconomy();
+            const enemyIntel = room.memory.enemyRoomName ? Memory.roomIntel[room.memory.enemyRoomName] : undefined;
+            const targetCleared = enemyIntel && enemyIntel.strength === 0 && Game.time - enemyIntel.scannedAt < 100;
+            if (targetCleared) {
+                console.log(`[${room.name}] RUSH succeeded — ${room.memory.enemyRoomName} cleared`);
+                // Chain attack: immediately look for the next weak target instead of resting
+                chainAttack(room);
                 break;
             }
             if (combatUnits === 0 && myCreeps > 0) {
-                console.log('[adaptive] → ECONOMY (RUSH failed — no combat units left)');
-                resetToEconomy();
+                console.log(`[${room.name}] RUSH failed — no combat units`);
+                chainAttack(room);
                 break;
             }
             if (myCreeps === 0) {
-                resetToEconomy();
+                resetToEconomy(room);
                 break;
             }
-            if (Memory.phaseTick && Game.time - Memory.phaseTick > RUSH_TIMEOUT) {
-                console.log('[adaptive] → ECONOMY (RUSH timed out)');
-                resetToEconomy();
+            if (room.memory.phaseTick && Game.time - room.memory.phaseTick > RUSH_TIMEOUT) {
+                console.log(`[${room.name}] RUSH timed out`);
+                chainAttack(room);
             }
             break;
         }
         case 'DEFEND': {
             const enemies = room.find(FIND_HOSTILE_CREEPS).length;
-            const enemyIntel = Memory.enemyRoomName ? Memory.roomIntel[Memory.enemyRoomName] : undefined;
+            const enemyIntel = room.memory.enemyRoomName ? Memory.roomIntel[room.memory.enemyRoomName] : undefined;
             const threatCleared = enemyIntel && enemyIntel.strength === 0 && Game.time - enemyIntel.scannedAt < 100;
             if (enemies === 0 && threatCleared) {
-                console.log('[adaptive] → ECONOMY (DEFEND succeeded)');
-                resetToEconomy();
+                console.log(`[${room.name}] DEFEND succeeded — counterattacking`);
+                chainAttack(room); // don't rest after defending, look for counter-target
             }
             else if (myCreeps === 0) {
-                resetToEconomy();
+                resetToEconomy(room);
             }
             break;
         }
     }
 }
-function resetToEconomy() {
-    Memory.phase = 'ECONOMY';
-    Memory.phaseTick = undefined;
-    Memory.combatState = 'RALLY';
+function findBestTarget(room, maxStrength) {
+    var _a, _b;
+    const intel = (_a = Memory.roomIntel) !== null && _a !== void 0 ? _a : {};
+    const ownedNames = new Set(Object.values(Game.rooms).filter(r => { var _a; return (_a = r.controller) === null || _a === void 0 ? void 0 : _a.my; }).map(r => r.name));
+    const reserved = new Set(Object.keys((_b = room.memory.remoteRooms) !== null && _b !== void 0 ? _b : {}));
+    let best = null;
+    for (const [name, data] of Object.entries(intel)) {
+        if (ownedNames.has(name))
+            continue; // don't attack ourselves
+        if (reserved.has(name))
+            continue; // don't attack rooms we're harvesting
+        if (data.strength > maxStrength)
+            continue;
+        if (data.strength === 0)
+            continue; // room is already empty
+        if (Game.time - data.scannedAt > MAX_ATTACK_INTEL_AGE)
+            continue; // stale
+        // Economic attack value: spawn is worth most (destroys economy), towers add risk cost
+        // Prefer player-owned rooms (enemy spawns) over invader rooms
+        const value = (data.enemySpawns * 120) // spawn = biggest economic target
+            + (data.controllerOwned ? 50 : 0) // player rooms are higher priority than NPC
+            - (data.enemyTowers * 30) // towers = increased cost to attack
+            - (data.strength * 2); // lower strength = easier target
+        if (!best || value > best.value) {
+            best = { name, strength: data.strength, value };
+        }
+    }
+    return best;
+}
+function findStrongestThreat(room) {
+    var _a;
+    const intel = (_a = Memory.roomIntel) !== null && _a !== void 0 ? _a : {};
+    const ownedNames = new Set(Object.values(Game.rooms).filter(r => { var _a; return (_a = r.controller) === null || _a === void 0 ? void 0 : _a.my; }).map(r => r.name));
+    let worst = null;
+    for (const [name, data] of Object.entries(intel)) {
+        if (ownedNames.has(name))
+            continue;
+        if (data.strength === 0)
+            continue;
+        if (Game.time - data.scannedAt > MAX_ATTACK_INTEL_AGE)
+            continue;
+        if (!worst || data.strength > worst.strength) {
+            worst = { name, strength: data.strength, value: -data.strength };
+        }
+    }
+    return worst;
+}
+// ─── Chain attack ─────────────────────────────────────────────────────────────
+// After clearing or abandoning a RUSH, immediately look for the next target
+// rather than retreating to ECONOMY. This keeps continuous offensive pressure.
+function chainAttack(room) {
+    // Reset combat state to rally for next campaign
+    room.memory.combatState = 'RALLY';
+    room.memory.enemyRoomName = undefined;
+    room.memory.enemyStrength = undefined;
+    room.memory.scoutTick = undefined;
+    const next = findBestTarget(room, RUSH_STRENGTH_THRESHOLD);
+    if (next) {
+        room.memory.phase = 'RUSH';
+        room.memory.phaseTick = Game.time;
+        room.memory.enemyRoomName = next.name;
+        room.memory.enemyStrength = next.strength;
+        console.log(`[${room.name}] → RUSH chaining (${next.name} str=${next.strength} val=${next.value})`);
+    }
+    else {
+        // No current target — go to ASSESS to get fresh scout data
+        room.memory.phase = 'ASSESS';
+        room.memory.phaseTick = Game.time;
+        console.log(`[${room.name}] → ASSESS (no chain target available)`);
+    }
+}
+function resetToEconomy(room) {
+    room.memory.phase = 'ECONOMY';
+    room.memory.phaseTick = undefined;
+    room.memory.combatState = 'RALLY';
+    room.memory.enemyRoomName = undefined;
+    room.memory.enemyStrength = undefined;
+    room.memory.scoutTick = undefined;
     Memory.roadsPlanned = false;
-    Memory.enemyRoomName = undefined;
-    Memory.enemyStrength = undefined;
-    Memory.scoutTick = undefined;
 }
 
 // Dynamic body builder — scales creep bodies to the available energy budget.
@@ -1177,6 +1793,9 @@ function buildBody(role, budget) {
         case 'upgrader': return upgraderBody(budget);
         case 'builder':
         case 'repairer': return workerBody(budget);
+        case 'scavenger': return scavengerBody(budget);
+        case 'courier': return courierBody(budget);
+        case 'reserver': return reserverBody(budget);
         case 'warrior': return warriorBody(budget);
         case 'ranger': return rangerBody(budget);
         case 'scout': return scoutBody(budget);
@@ -1220,6 +1839,30 @@ function workerBody(budget) {
     const units = Math.min(Math.floor(budget / 200), 8);
     return [...r(WORK, units), ...r(CARRY, units), ...r(MOVE, units)];
 }
+// Reserver: CLAIM (600e) + extra MOVE for fast travel to adjacent rooms.
+// One CLAIM part adds 600 ticks per reserveController() call (cap 5000t).
+function reserverBody(budget) {
+    if (budget < 650)
+        return null;
+    const extraMoves = Math.min(Math.floor((budget - 650) / 50), 4);
+    return [CLAIM, ...r(MOVE, 1 + extraMoves)];
+}
+// Scavenger: fast looter — equal CARRY and MOVE for full-road speed plus TOUGH buffer.
+// Repeat unit [T,C,M] = 180e. Cap at 8 units. Does not need WORK.
+function scavengerBody(budget) {
+    if (budget < 180)
+        return null;
+    const units = Math.min(Math.floor(budget / 180), 8);
+    return [...r(TOUGH, units), ...r(CARRY, units), ...r(MOVE, units)];
+}
+// Courier: high-carry hauler for inter-room trips on plains (1:1 CARRY:MOVE).
+// Repeat unit [C,M] = 100e. No TOUGH — trips through owned rooms only.
+function courierBody(budget) {
+    if (budget < 100)
+        return null;
+    const units = Math.min(Math.floor(budget / 100), 16);
+    return [...r(CARRY, units), ...r(MOVE, units)];
+}
 // ─── Combat roles ─────────────────────────────────────────────────────────────
 // Melee warrior: TOUGH buffer, ATTACK, HEAL (self-repair), MOVE.
 // Repeat unit [T,A,H,M,M] = 440e.
@@ -1249,7 +1892,9 @@ function rangerBody(budget) {
 function scoutBody(budget) {
     if (budget < 50)
         return null;
-    return r(MOVE, Math.min(Math.floor(budget / 50), 5));
+    // Pure-MOVE creeps have zero body weight → zero fatigue → full speed on all terrain.
+    // Extra MOVE parts add cost with no benefit.
+    return [MOVE];
 }
 // CLAIM is 600e. Extra MOVE for faster travel to the target room.
 function claimerBody(budget) {
@@ -1369,42 +2014,159 @@ function bootstrapTargets() {
     };
 }
 
+const _lastRun = {};
+/**
+ * Returns true at most once per `interval` ticks for a given `key`.
+ * Fires on the first call after a global reset regardless of tick alignment.
+ * From screeps-quorum Process.period() — ported to a standalone module utility.
+ */
+function period(interval, key) {
+    var _a;
+    const last = (_a = _lastRun[key]) !== null && _a !== void 0 ? _a : 0;
+    if (Game.time - last >= interval) {
+        _lastRun[key] = Game.time;
+        return true;
+    }
+    return false;
+}
+
+const DEFAULT_PID_CONFIG = {
+    kp: 3.0,
+    ki: 0.2,
+    kd: 1.5,
+    setpoint: 0.60, // target 60% of total energy capacity
+    outputMin: 0,
+    outputMax: 4,
+    outputMid: 1, // baseline = 1 upgrader at steady state
+    integralMax: 5.0,
+};
+/**
+ * Compute one PID step.
+ *
+ * @param pv    Process variable — current total energy (spawn + containers + storage)
+ * @param cap   Total energy capacity (same components as pv)
+ * @param state Previous PID state (integral, lastError, lastTick)
+ * @param config PID tuning parameters
+ * @param tick  Current game tick
+ * @returns { output, nextState }
+ *
+ * Error is normalized: (pv - setpoint*cap) / cap → dimensionless, cap-independent.
+ * Positive error = energy above setpoint → increase sinks (more upgraders).
+ * Negative error = energy below setpoint → decrease sinks (fewer upgraders).
+ * Output is offsetted by outputMid so zero error → outputMid (baseline upgrader count).
+ */
+function computePID(pv, cap, state, config, tick) {
+    const setpointAbs = config.setpoint * cap;
+    const error = (pv - setpointAbs) / Math.max(cap, 1); // normalized error
+    const dt = Math.max(1, tick - state.lastTick);
+    // Proportional
+    const p = config.kp * error;
+    // Integral with anti-windup clamp
+    const rawIntegral = state.integral + error * dt;
+    const integral = Math.max(-5, Math.min(config.integralMax, rawIntegral));
+    const i = config.ki * integral;
+    // Derivative (error rate of change per tick)
+    const d = config.kd * (error - state.lastError) / dt;
+    // Output = baseline + PID correction
+    const raw = config.outputMid + p + i + d;
+    const output = Math.max(config.outputMin, Math.min(config.outputMax, raw));
+    return {
+        output,
+        nextState: { integral, lastError: error, lastTick: tick },
+    };
+}
+
 // Tracks energy flow and calculates dynamic spawn targets based on actual room state.
 // Sampled every SAMPLE_INTERVAL ticks; keeps WINDOW_SIZE samples (= WINDOW_TICKS history).
 //
-// energyStatus.level drives spawn decisions:
-//   SURPLUS  — energy growing, can spawn freely
-//   STABLE   — balanced, spawn economy/infrastructure only
-//   DEFICIT  — draining, hold combat spawns
-//   CRITICAL — emergency, cull expensive creeps
+// Each sample captures three dimensions:
+//   avail            — spawn/extension energy (what the spawn system sees)
+//   containerFillPct — how full containers are (buffer between harvest and delivery)
+//   sourceDepletedPct— how often sources are at 0 (ceiling on extraction rate)
+//
+// From these, one bottleneck is identified per update cycle and stored in energyStatus.
+// calcDynamicTargets reads that bottleneck to shift spawn targets toward the constraint.
+//
+// Theory-of-constraints priority:
+//   SOURCE_MAXED        → extraction ceiling hit; expansion is the only fix
+//   HARVESTER_SHORTAGE  → containers emptying; add harvesters until containers refill
+//   HAULER_SHORTAGE     → containers filling up but spawn energy low; add haulers
+//   BALANCED            → no constraint; use baseline targets
 const SAMPLE_INTERVAL = 5; // sample every N ticks
 const WINDOW_SIZE = 20; // samples kept (= WINDOW_SIZE × SAMPLE_INTERVAL ticks)
 const MAX_HARVESTERS_PER_SOURCE = 4;
+const MAX_HAULERS_PER_SOURCE = 3; // hard cap: sources * MAX + 2
+// ─── Total energy (PV for PID) ────────────────────────────────────────────────
+function computeTotalEnergy(room) {
+    var _a, _b, _c, _d;
+    const containers = room.find(FIND_STRUCTURES, {
+        filter: s => s.structureType === STRUCTURE_CONTAINER,
+    });
+    const containerCurrent = containers.reduce((s, c) => s + c.store[RESOURCE_ENERGY], 0);
+    const containerCapacity = containers.reduce((s, c) => { var _a; return s + ((_a = c.store.getCapacity(RESOURCE_ENERGY)) !== null && _a !== void 0 ? _a : 0); }, 0);
+    const storageCurrent = (_b = (_a = room.storage) === null || _a === void 0 ? void 0 : _a.store[RESOURCE_ENERGY]) !== null && _b !== void 0 ? _b : 0;
+    const storageCapacity = (_d = (_c = room.storage) === null || _c === void 0 ? void 0 : _c.store.getCapacity(RESOURCE_ENERGY)) !== null && _d !== void 0 ? _d : 0;
+    return {
+        current: room.energyAvailable + containerCurrent + storageCurrent,
+        capacity: room.energyCapacityAvailable + containerCapacity + storageCapacity,
+    };
+}
 // ─── Sampling ─────────────────────────────────────────────────────────────────
 function trackEnergyFlow(room) {
-    if (Game.time % SAMPLE_INTERVAL !== 0)
+    var _a;
+    if (!period(SAMPLE_INTERVAL, `economy:sample:${room.name}`))
         return;
-    if (!Memory.energyHistory)
-        Memory.energyHistory = [];
-    Memory.energyHistory.push({ tick: Game.time, avail: room.energyAvailable });
-    if (Memory.energyHistory.length > WINDOW_SIZE) {
-        Memory.energyHistory = Memory.energyHistory.slice(-WINDOW_SIZE);
+    if (!room.memory.energyHistory)
+        room.memory.energyHistory = [];
+    room.memory.energyHistory.push({
+        tick: Game.time,
+        avail: room.energyAvailable,
+        containerFillPct: sampleContainerFillPct(room),
+        sourceDepletedPct: sampleSourceDepletedPct(room),
+    });
+    if (room.memory.energyHistory.length > WINDOW_SIZE) {
+        room.memory.energyHistory = room.memory.energyHistory.slice(-WINDOW_SIZE);
     }
-    Memory.energyStatus = computeStatus(room);
+    const status = computeStatus(room);
+    status.bottleneck = detectBottleneck(status, room);
+    room.memory.energyStatus = status;
+    // ── PID: drive sink demand (upgrader count) toward setpoint ───────────────
+    const { current, capacity } = computeTotalEnergy(room);
+    const prevPID = (_a = room.memory.pidState) !== null && _a !== void 0 ? _a : { integral: 0, lastError: 0, lastTick: Game.time - SAMPLE_INTERVAL };
+    const { output, nextState } = computePID(current, capacity, prevPID, DEFAULT_PID_CONFIG, Game.time);
+    room.memory.pidState = { ...nextState, output };
+}
+function sampleContainerFillPct(room) {
+    const containers = room.find(FIND_STRUCTURES, {
+        filter: s => s.structureType === STRUCTURE_CONTAINER,
+    });
+    if (containers.length === 0)
+        return 50; // neutral before containers are built
+    const total = containers.reduce((s, c) => {
+        const cap = c.store.getCapacity(RESOURCE_ENERGY);
+        return s + (cap > 0 ? c.store[RESOURCE_ENERGY] / cap : 0);
+    }, 0);
+    return Math.round(total / containers.length * 100);
+}
+function sampleSourceDepletedPct(room) {
+    const sources = room.find(FIND_SOURCES);
+    if (sources.length === 0)
+        return 0;
+    const depleted = sources.filter(s => s.energy === 0).length;
+    return Math.round(depleted / sources.length * 100);
 }
 function computeStatus(room) {
     var _a;
-    const h = (_a = Memory.energyHistory) !== null && _a !== void 0 ? _a : [];
+    const h = (_a = room.memory.energyHistory) !== null && _a !== void 0 ? _a : [];
     const cap = room.energyCapacityAvailable || 1;
     const pct = Math.round(room.energyAvailable / cap * 100);
     if (h.length < 4) {
-        return { netRate: 0, trend: 0, pct, level: 'STABLE' };
+        return { netRate: 0, trend: 0, pct, level: 'STABLE', bottleneck: 'BALANCED' };
     }
     const first = h[0];
     const last = h[h.length - 1];
     const dt = last.tick - first.tick;
     const netRate = dt > 0 ? (last.avail - first.avail) / dt : 0;
-    // Trend: compare first-half rate vs second-half rate
     const mid = h[Math.floor(h.length / 2)];
     const rate1 = (mid.avail - first.avail) / Math.max(mid.tick - first.tick, 1);
     const rate2 = (last.avail - mid.avail) / Math.max(last.tick - mid.tick, 1);
@@ -1418,39 +2180,149 @@ function computeStatus(room) {
         level = 'SURPLUS';
     else
         level = 'STABLE';
-    return { netRate: Math.round(netRate * 100) / 100, trend: Math.round(trend * 100) / 100, pct, level };
+    return {
+        netRate: Math.round(netRate * 100) / 100,
+        trend: Math.round(trend * 100) / 100,
+        pct,
+        level,
+        bottleneck: 'BALANCED', // overwritten by detectBottleneck after this returns
+    };
+}
+// ─── Bottleneck detection ─────────────────────────────────────────────────────
+function detectBottleneck(status, room) {
+    var _a;
+    const h = ((_a = room.memory.energyHistory) !== null && _a !== void 0 ? _a : []).slice(-8);
+    if (h.length < 4)
+        return 'BALANCED';
+    const avgCont = avgField(h, 'containerFillPct', 50);
+    const avgSrc = avgField(h, 'sourceDepletedPct', 0);
+    // Sources at 0 more than 60% of samples → we've hit extraction ceiling
+    if (avgSrc > 60)
+        return 'SOURCE_MAXED';
+    // Containers chronically low AND energy declining → not enough harvesters
+    if (avgCont < 25 && (status.level === 'DEFICIT' || status.level === 'CRITICAL')) {
+        return 'HARVESTER_SHORTAGE';
+    }
+    // Containers chronically backed up, spawn energy declining → haulers can't drain fast enough.
+    // Require DEFICIT level AND negative rate to avoid false positives on transient post-spawn dips.
+    if (avgCont > 60 && status.pct < 50 &&
+        (status.level === 'DEFICIT' || status.level === 'CRITICAL') &&
+        status.netRate < -0.3) {
+        return 'HAULER_SHORTAGE';
+    }
+    return 'BALANCED';
 }
 function calcDynamicTargets(room) {
-    var _a, _b, _c, _d;
+    var _a, _b, _c, _d, _e, _f, _g, _h, _j;
     const rcl = (_b = (_a = room.controller) === null || _a === void 0 ? void 0 : _a.level) !== null && _b !== void 0 ? _b : 0;
     const sources = room.find(FIND_SOURCES);
     const sites = room.find(FIND_CONSTRUCTION_SITES).length;
-    room.find(FIND_STRUCTURES, {
-        filter: s => s.structureType === STRUCTURE_CONTAINER
+    const containers = room.find(FIND_STRUCTURES, {
+        filter: s => s.structureType === STRUCTURE_CONTAINER,
     }).length;
     const hasControllerContainer = ((_d = (_c = room.controller) === null || _c === void 0 ? void 0 : _c.pos.findInRange(FIND_STRUCTURES, 3, {
         filter: s => s.structureType === STRUCTURE_CONTAINER,
     }).length) !== null && _d !== void 0 ? _d : 0) > 0;
-    // Harvesters: up to MAX_HARVESTERS_PER_SOURCE per source, capped by walkable positions
-    const harvester = sources.reduce((sum, src) => sum + Math.min(walkableAround(src), MAX_HARVESTERS_PER_SOURCE), 0);
-    // Haulers: 1 per source container + 1 for controller container (if it exists)
+    const bottleneck = (_f = (_e = room.memory.energyStatus) === null || _e === void 0 ? void 0 : _e.bottleneck) !== null && _f !== void 0 ? _f : 'BALANCED';
+    const h = ((_g = room.memory.energyHistory) !== null && _g !== void 0 ? _g : []).slice(-8);
+    const avgContainerFill = avgField(h, 'containerFillPct', 50);
+    // ── Harvesters ────────────────────────────────────────────────────────────
+    // SOURCE_MAXED: sources can't keep up → 1 per source keeps steady state
+    // Default: max positions (up to 4) per source — more bodies = more WORK throughput
+    const harvester = bottleneck === 'SOURCE_MAXED'
+        ? sources.length
+        : sources.reduce((sum, src) => sum + Math.min(walkableAround(src), MAX_HARVESTERS_PER_SOURCE), 0);
+    // ── Haulers ───────────────────────────────────────────────────────────────
+    // Distance-based: haulers_needed = ceil(source_output × round_trip / hauler_carry)
+    // Source output = 10e/tick; round trip = 2 × path_distance_to_storage (cached).
+    // HAULER_SHORTAGE: add 1 extra hauler per source container to drain the backlog.
     const sourceCntrs = sources.reduce((sum, src) => sum + src.pos.findInRange(FIND_STRUCTURES, 1, { filter: s => s.structureType === STRUCTURE_CONTAINER }).length, 0);
-    const hauler = sourceCntrs + (hasControllerContainer ? 1 : 0);
-    // Builders: scale with pending construction sites
-    const builder = sites === 0 ? 0
-        : sites <= 5 ? 1
-            : sites <= 15 ? 2
-                : sites <= 30 ? 3
-                    : 4;
-    // Upgrader: only once there's a controller container to supply it
-    const upgrader = hasControllerContainer ? 1 : 0;
-    // Repairer: only in DEFEND phase (handled by phase override in spawnManager)
-    const repairer = 0;
-    // Scout: 1 once RCL 1, so we always have intel
+    const haulerCarry = Math.max(100, Math.min(Math.floor(room.energyCapacityAvailable / 150), 10) * 100);
+    let baseHaulers = 0;
+    const storage = room.storage;
+    for (const src of sources) {
+        const hasCntr = src.pos.findInRange(FIND_STRUCTURES, 1, {
+            filter: s => s.structureType === STRUCTURE_CONTAINER,
+        }).length > 0;
+        if (!hasCntr)
+            continue;
+        const dist = getSourceDistance(room, src, storage);
+        const roundTrip = dist * 2;
+        baseHaulers += Math.max(1, Math.ceil(10 * roundTrip / haulerCarry));
+    }
+    if (hasControllerContainer)
+        baseHaulers += 1;
+    const haulerRaw = bottleneck === 'HAULER_SHORTAGE'
+        ? baseHaulers + sourceCntrs
+        : baseHaulers;
+    // Hard cap: prevent over-spawning haulers that starve harvester replacements
+    const hauler = Math.min(haulerRaw, sources.length * MAX_HAULERS_PER_SOURCE + 2);
+    // ── Builders ──────────────────────────────────────────────────────────────
+    // Gate builder count on container fill: spawning idle builders wastes capacity.
+    // sourceCntrs === 0 is the right bootstrap signal — no source has a container yet,
+    // so no supply chain exists. Allow 1 builder to build those first containers.
+    // Once any source container exists, scale with sites but throttle if fill is low.
+    let builder;
+    if (sites === 0) {
+        builder = 0;
+    }
+    else if (sourceCntrs === 0) {
+        builder = 1; // bootstrap: at least 1 builder until the supply chain exists
+    }
+    else {
+        const baseBuilders = sites <= 5 ? 1 : sites <= 15 ? 2 : sites <= 30 ? 3 : 4;
+        // Containers below 25% → builders will idle; cap to 1 until supply recovers
+        builder = avgContainerFill < 25 ? Math.max(1, Math.ceil(baseBuilders / 2)) : baseBuilders;
+    }
+    // ── Upgrader ──────────────────────────────────────────────────────────────
+    // PID output drives upgrader count: high energy → more upgraders (more sinks),
+    // low energy → fewer upgraders (preserve energy for spawning).
+    // Without a controller container, upgraders can't sit and drain steadily → 0.
+    const pidOutput = (_j = (_h = room.memory.pidState) === null || _h === void 0 ? void 0 : _h.output) !== null && _j !== void 0 ? _j : DEFAULT_PID_CONFIG.outputMid;
+    const upgrader = hasControllerContainer
+        ? Math.max(0, Math.min(4, Math.round(pidOutput)))
+        : 0;
+    const repairer = 0; // phase override in spawnManager handles DEFEND
     const scout = rcl >= 1 ? 1 : 0;
-    return { harvester, hauler, upgrader, builder, repairer, scout };
+    // 1 scavenger once containers exist (supply chain is up, loot prevention matters)
+    const scavenger = containers > 0 ? 1 : 0;
+    return { harvester, hauler, upgrader, builder, repairer, scout, scavenger };
 }
 // ─── Helpers ──────────────────────────────────────────────────────────────────
+function avgField(samples, field, fallback) {
+    if (samples.length === 0)
+        return fallback;
+    return samples.reduce((s, x) => { var _a; return s + ((_a = x[field]) !== null && _a !== void 0 ? _a : fallback); }, 0) / samples.length;
+}
+// ─── Distance caching ─────────────────────────────────────────────────────────
+// PathFinder is expensive; cache source→storage distances in room.memory so we
+// only recalculate when storage appears/disappears or every 5000 ticks.
+const DISTANCE_RECALC_INTERVAL = 5000;
+function getSourceDistance(room, source, storage) {
+    var _a, _b, _c, _d;
+    if (!room.memory.sourceDistances)
+        room.memory.sourceDistances = {};
+    const key = source.id;
+    const cached = room.memory.sourceDistances[key];
+    const lastCalc = room.memory[`_distTick_${key}`];
+    if (cached !== undefined && lastCalc && Game.time - lastCalc < DISTANCE_RECALC_INTERVAL) {
+        return cached;
+    }
+    // Recalculate via PathFinder.
+    // Prefer storage → spawn → controller as destination in that priority order.
+    // Haulers deliver to spawn/extensions, not the controller; using controller
+    // over-estimates distance and inflates hauler targets.
+    const dest = (_c = (_a = storage === null || storage === void 0 ? void 0 : storage.pos) !== null && _a !== void 0 ? _a : (_b = room.find(FIND_MY_SPAWNS)[0]) === null || _b === void 0 ? void 0 : _b.pos) !== null && _c !== void 0 ? _c : (_d = room.controller) === null || _d === void 0 ? void 0 : _d.pos;
+    let dist = 10; // fallback when no dest or path incomplete
+    if (dest) {
+        const result = PathFinder.search(source.pos, { pos: dest, range: 1 }, { plainCost: 1, swampCost: 2, maxOps: 2000 });
+        if (!result.incomplete)
+            dist = result.path.length;
+    }
+    room.memory.sourceDistances[key] = dist;
+    room.memory[`_distTick_${key}`] = Game.time;
+    return dist;
+}
 function walkableAround(source) {
     const terrain = source.room.getTerrain();
     let count = 0;
@@ -1472,23 +2344,30 @@ function walkableAround(source) {
 const MIN_COMBAT_ENERGY = 400;
 const WARRIORS_PER_PLATOON = 3;
 const DOWNGRADE_EMERGENCY_THRESHOLD = 4000;
+// Below this threshold, non-essential roles (upgrader, scout, builder) are skipped.
+// Keeps spawn energy available for harvesters and haulers that maintain the economy.
+const SPAWN_FLOOR = 200;
 // Combat targets per phase — these OVERLAY the dynamic economy targets
 const COMBAT_TARGETS = {
     ECONOMY: { warrior: 0, ranger: 0, healer: 0, repairer: 0 },
-    ASSESS: { warrior: 0, ranger: 0, healer: 0, repairer: 0 },
-    RUSH: { warrior: 6, ranger: 2, healer: 2, repairer: 0 },
+    ASSESS: { warrior: 2, ranger: 1, healer: 0, repairer: 0 }, // pre-stage a raid party while scouting
+    RUSH: { warrior: 8, ranger: 4, healer: 2, repairer: 0 }, // was warrior:6 ranger:2
     DEFEND: { warrior: 4, ranger: 2, healer: 2, repairer: 2 },
 };
 function manageSpawns(room) {
-    var _a, _b, _c, _d, _e, _f, _g, _h, _j, _k, _l, _m;
+    var _a, _b, _c, _d, _e, _f, _g, _h, _j, _k, _l, _m, _o, _p, _q, _r, _s, _t, _u, _v, _w;
     const spawns = room.find(FIND_MY_SPAWNS).filter(s => !s.spawning);
     if (spawns.length === 0)
         return;
     const spawn = spawns[0];
-    const phase = (_a = Memory.phase) !== null && _a !== void 0 ? _a : 'ECONOMY';
+    const phase = ((_a = room.memory.phase) !== null && _a !== void 0 ? _a : 'ECONOMY');
     const creeps = room.find(FIND_MY_CREEPS);
-    const counts = countByRole(creeps);
-    const status = (_b = Memory.energyStatus) !== null && _b !== void 0 ? _b : { level: 'STABLE' };
+    // Count all creeps homed to this room, including those scouting/mining/fighting in
+    // other rooms — room.find only returns creeps physically present, so roaming creeps
+    // (scouts, remote miners, defenders) would appear missing and trigger duplicate spawns.
+    const allHomeCreeps = Object.values(Game.creeps).filter(c => c.memory.homeRoom === room.name);
+    const counts = countByRole(allHomeCreeps);
+    const status = (_b = room.memory.energyStatus) !== null && _b !== void 0 ? _b : { level: 'STABLE'};
     // Dynamic economy targets based on actual room state
     const eco = calcDynamicTargets(room);
     const combat = COMBAT_TARGETS[phase];
@@ -1522,26 +2401,127 @@ function manageSpawns(room) {
         trySpawn(spawn, 'harvester', room.energyAvailable);
         return;
     }
+    // ── Local defense: room under active attack → spawn defenders before eco ─
+    const localThreat = ((_h = (_g = Memory.roomThreats) === null || _g === void 0 ? void 0 : _g[room.name]) === null || _h === void 0 ? void 0 : _h.severity) === 'ACTIVE';
+    if (localThreat && !inSafeMode && room.energyAvailable >= MIN_COMBAT_ENERGY) {
+        if (((_j = counts.repairer) !== null && _j !== void 0 ? _j : 0) < 2) {
+            trySpawn(spawn, 'repairer', room.energyAvailable);
+            return;
+        }
+        if (((_k = counts.warrior) !== null && _k !== void 0 ? _k : 0) < 4) {
+            trySpawn(spawn, 'warrior', room.energyAvailable, { platoonId: assignWarriorPlatoon(creeps) });
+            return;
+        }
+        if (((_l = counts.ranger) !== null && _l !== void 0 ? _l : 0) < 2) {
+            trySpawn(spawn, 'ranger', room.energyAvailable, { platoonId: assignWarriorPlatoon(creeps) });
+            return;
+        }
+        if (((_m = counts.healer) !== null && _m !== void 0 ? _m : 0) < 1) {
+            const pid = assignHealerPlatoon(creeps);
+            if (pid) {
+                trySpawn(spawn, 'healer', room.energyAvailable, { platoonId: pid });
+                return;
+            }
+        }
+    }
     // ── Economy roles — respect energy level ─────────────────────────────────
-    // In DEFICIT/CRITICAL don't spawn new haulers/upgraders (save energy for harvesters)
     const canSpawnEconomy = status.level !== 'CRITICAL';
+    // Roles marked minLevel:'STABLE' are skipped during DEFICIT to prevent the
+    // spawn-then-prune death spiral (spawn 200e upgrader → CRITICAL → prune → repeat).
+    // Roles marked needsFloor:true are skipped when energyAvailable < SPAWN_FLOOR (200e)
+    // so energy sinks never drain the pool needed for essential harvester replacements.
+    const LEVEL_ORDER = ['CRITICAL', 'DEFICIT', 'STABLE', 'SURPLUS'];
     const ecoRoles = [
         { role: 'harvester', target: eco.harvester },
-        { role: 'builder', target: eco.builder },
+        { role: 'builder', target: eco.builder, needsFloor: true },
         { role: 'hauler', target: eco.hauler },
-        { role: 'upgrader', target: eco.upgrader },
-        { role: 'scout', target: eco.scout },
+        { role: 'upgrader', target: eco.upgrader, minLevel: 'STABLE', needsFloor: true },
+        { role: 'scout', target: eco.scout, minLevel: 'STABLE', needsFloor: true },
+        { role: 'scavenger', target: eco.scavenger },
     ];
+    // Proportional hauler budget (Quorum: src/programs/city/mine.js).
+    // Size hauler carry capacity to the actual source→storage travel distance rather
+    // than always spending max available energy. Prevents over-built haulers in
+    // high-RCL rooms and under-built haulers in large rooms.
+    // Formula: carryNeeded = distance × 1.3 × 20 (energy generated per round trip)
+    // Our 2C+1M unit carries 100e and costs 150e, so budget = ceil(carryNeeded/100) × 150.
+    // Capped at room.energyAvailable so we never wait — we build the largest affordable
+    // hauler up to the distance-optimal size.
+    const haulerBudget = computeLocalHaulerBudget(room);
     if (canSpawnEconomy) {
-        for (const { role, target } of ecoRoles) {
-            if (((_g = counts[role]) !== null && _g !== void 0 ? _g : 0) < target) {
-                trySpawn(spawn, role, room.energyAvailable);
+        for (const { role, target, extra, minLevel, needsFloor } of ecoRoles) {
+            if (minLevel && LEVEL_ORDER.indexOf(status.level) < LEVEL_ORDER.indexOf(minLevel))
+                continue;
+            if (needsFloor && room.energyAvailable < SPAWN_FLOOR)
+                continue;
+            if (((_o = counts[role]) !== null && _o !== void 0 ? _o : 0) < target) {
+                const budget = role === 'hauler' ? haulerBudget : room.energyAvailable;
+                trySpawn(spawn, role, budget, extra);
+                return;
+            }
+        }
+    }
+    // ── Remote mining: reservers + remote miners + remote haulers ─────────────
+    if (canSpawnEconomy) {
+        for (const [remoteName, rt] of Object.entries((_p = room.memory.remoteRooms) !== null && _p !== void 0 ? _p : {})) {
+            // Skip rooms where hostile creeps were spotted recently — sending
+            // miners/haulers there wastes spawn energy until it clears.
+            const remoteIntel = (_q = Memory.roomIntel) === null || _q === void 0 ? void 0 : _q[remoteName];
+            const threatened = remoteIntel && remoteIntel.enemyCreeps > 0 &&
+                Game.time - remoteIntel.scannedAt < 300;
+            if (threatened)
+                continue;
+            // Reserver: keep the room reserved (requires 650e — skip at RCL 2)
+            const canAffordReserver = room.energyCapacityAvailable >= 650;
+            const needsReserver = canAffordReserver && rt.reservedUntil < Game.time + 500;
+            const hasReserver = allHomeCreeps.some(c => {
+                var _a;
+                return c.memory.role === 'reserver' && c.memory.targetRoomName === remoteName &&
+                    ((_a = c.ticksToLive) !== null && _a !== void 0 ? _a : 1500) >= PRE_SPAWN_TICKS;
+            });
+            if (needsReserver && !hasReserver) {
+                trySpawn(spawn, 'reserver', room.energyAvailable, { targetRoomName: remoteName });
+                return;
+            }
+            // Remote miners (harvesters assigned to remoteRoom)
+            const currentMiners = allHomeCreeps.filter(c => {
+                var _a;
+                return c.memory.role === 'harvester' && c.memory.remoteRoom === remoteName &&
+                    ((_a = c.ticksToLive) !== null && _a !== void 0 ? _a : 1500) >= PRE_SPAWN_TICKS;
+            }).length;
+            if (currentMiners < rt.miners) {
+                trySpawn(spawn, 'harvester', room.energyAvailable, { remoteRoom: remoteName });
+                return;
+            }
+            // Remote haulers
+            const currentHaulers = allHomeCreeps.filter(c => {
+                var _a;
+                return c.memory.role === 'hauler' && c.memory.remoteRoom === remoteName &&
+                    ((_a = c.ticksToLive) !== null && _a !== void 0 ? _a : 1500) >= PRE_SPAWN_TICKS;
+            }).length;
+            if (currentHaulers < rt.haulers) {
+                trySpawn(spawn, 'hauler', room.energyAvailable, { remoteRoom: remoteName });
+                return;
+            }
+        }
+    }
+    // Courier: spawn when a deficit neighbor room needs energy and we have surplus
+    if (canSpawnEconomy && ((_r = room.memory.energySurplus) !== null && _r !== void 0 ? _r : 0) > 0) {
+        const deficitRoom = findDeficitNeighbor(room);
+        if (deficitRoom) {
+            const existingCouriers = allHomeCreeps.filter(c => {
+                var _a;
+                return c.memory.role === 'courier' && c.memory.courierTarget === deficitRoom &&
+                    ((_a = c.ticksToLive) !== null && _a !== void 0 ? _a : 1500) >= PRE_SPAWN_TICKS;
+            }).length;
+            if (existingCouriers < 2) {
+                trySpawn(spawn, 'courier', room.energyAvailable, { courierTarget: deficitRoom });
                 return;
             }
         }
     }
     // Repairer (phase-gated)
-    if (canSpawnEconomy && ((_h = counts.repairer) !== null && _h !== void 0 ? _h : 0) < ((_j = combat.repairer) !== null && _j !== void 0 ? _j : 0)) {
+    if (canSpawnEconomy && ((_s = counts.repairer) !== null && _s !== void 0 ? _s : 0) < ((_t = combat.repairer) !== null && _t !== void 0 ? _t : 0)) {
         trySpawn(spawn, 'repairer', room.energyAvailable);
         return;
     }
@@ -1549,17 +2529,17 @@ function manageSpawns(room) {
     const canSpawnCombat = !inSafeMode && room.energyAvailable >= MIN_COMBAT_ENERGY &&
         (status.level === 'SURPLUS' || status.level === 'STABLE');
     if (canSpawnCombat) {
-        if (((_k = counts.warrior) !== null && _k !== void 0 ? _k : 0) < combat.warrior) {
+        if (((_u = counts.warrior) !== null && _u !== void 0 ? _u : 0) < combat.warrior) {
             const platoonId = assignWarriorPlatoon(creeps);
             trySpawn(spawn, 'warrior', room.energyAvailable, { platoonId });
             return;
         }
-        if (((_l = counts.ranger) !== null && _l !== void 0 ? _l : 0) < combat.ranger) {
+        if (((_v = counts.ranger) !== null && _v !== void 0 ? _v : 0) < combat.ranger) {
             const platoonId = assignWarriorPlatoon(creeps);
             trySpawn(spawn, 'ranger', room.energyAvailable, { platoonId });
             return;
         }
-        if (((_m = counts.healer) !== null && _m !== void 0 ? _m : 0) < combat.healer) {
+        if (((_w = counts.healer) !== null && _w !== void 0 ? _w : 0) < combat.healer) {
             const platoonId = assignHealerPlatoon(creeps);
             if (platoonId)
                 trySpawn(spawn, 'healer', room.energyAvailable, { platoonId });
@@ -1568,14 +2548,17 @@ function manageSpawns(room) {
 }
 // ─── Prune excess creeps ──────────────────────────────────────────────────────
 function pruneExcessCreeps(room) {
-    var _a, _b;
-    const phase = (_a = Memory.phase) !== null && _a !== void 0 ? _a : 'ECONOMY';
+    var _a, _b, _c;
+    const phase = (_a = room.memory.phase) !== null && _a !== void 0 ? _a : 'ECONOMY';
     const creeps = room.find(FIND_MY_CREEPS);
     const counts = countByRole(creeps);
-    const phaseAge = Memory.phaseTick ? Game.time - Memory.phaseTick : 0;
-    const status = Memory.energyStatus;
+    const phaseAge = room.memory.phaseTick ? Game.time - room.memory.phaseTick : 0;
+    const status = room.memory.energyStatus;
     // Suicide combat units after sustained ECONOMY (they're RUSH leftovers)
-    if (phase === 'ECONOMY' && phaseAge > 500) {
+    const energyLevel = (_b = status === null || status === void 0 ? void 0 : status.level) !== null && _b !== void 0 ? _b : 'STABLE';
+    const urgentCull = phase === 'ECONOMY' && energyLevel !== 'SURPLUS';
+    const timedCull = phase === 'ECONOMY' && phaseAge > 500;
+    if (urgentCull || timedCull) {
         for (const c of creeps) {
             if (c.memory.role === 'warrior' || c.memory.role === 'ranger' || c.memory.role === 'healer') {
                 console.log(`[adaptive] Retiring ${c.memory.role} (ECONOMY for ${phaseAge} ticks)`);
@@ -1599,7 +2582,7 @@ function pruneExcessCreeps(room) {
         const target = eco[role];
         if (target === 0)
             continue;
-        const count = (_b = counts[role]) !== null && _b !== void 0 ? _b : 0;
+        const count = (_c = counts[role]) !== null && _c !== void 0 ? _c : 0;
         const excess = count - target * 2;
         if (excess <= 0)
             continue;
@@ -1645,6 +2628,25 @@ function buildPlatoonMap(creeps) {
     }
     return map;
 }
+// Returns the name of an adjacent owned room that needs energy, or null.
+function findDeficitNeighbor(room) {
+    var _a;
+    const exits = Game.map.describeExits(room.name);
+    if (!exits)
+        return null;
+    const neighbors = Object.values(exits).filter((r) => !!r);
+    for (const neighbor of neighbors) {
+        const nr = Game.rooms[neighbor];
+        if (!((_a = nr === null || nr === void 0 ? void 0 : nr.controller) === null || _a === void 0 ? void 0 : _a.my))
+            continue;
+        const nStorage = nr.storage;
+        if (!nStorage)
+            continue;
+        if (nStorage.store[RESOURCE_ENERGY] < 10000)
+            return neighbor;
+    }
+    return null;
+}
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 function trySpawn(spawn, role, energy, extraMemory = {}) {
     const body = buildBody(role, energy);
@@ -1652,7 +2654,7 @@ function trySpawn(spawn, role, energy, extraMemory = {}) {
         return;
     const name = `${role}_${Game.time}`;
     const result = spawn.spawnCreep(body, name, {
-        memory: { role, working: false, ...extraMemory },
+        memory: { role, working: false, homeRoom: spawn.room.name, ...extraMemory },
     });
     if (result === OK) {
         const cost = body.reduce((s, p) => s + BODYPART_COST[p], 0);
@@ -1662,8 +2664,9 @@ function trySpawn(spawn, role, energy, extraMemory = {}) {
 }
 // Creeps with fewer than PRE_SPAWN_TICKS remaining are excluded from the count.
 // This triggers a replacement spawn BEFORE the old creep dies, so coverage
-// is continuous with no gap. Threshold covers max spawn time + safety buffer.
-const PRE_SPAWN_TICKS = 60; // body × 3 ticks per part + ~20 tick buffer
+// is continuous with no gap. Largest bodies (hauler/upgrader ~33 parts) take
+// ~100 ticks to spawn, so 100 covers the worst case with a small buffer.
+const PRE_SPAWN_TICKS = 100;
 function countByRole(creeps) {
     var _a, _b;
     const c = {};
@@ -1675,6 +2678,34 @@ function countByRole(creeps) {
     }
     return c;
 }
+// Compute ideal hauler energy budget from average source→storage path distance.
+// Ported from screeps-quorum/mine.js `mineSource` hauler section.
+// Each 2C+1M unit (150e) carries 100e; we need enough carry for one full round trip.
+// Capped at room.energyAvailable so we never block the spawn queue waiting for energy.
+function computeLocalHaulerBudget(room) {
+    const distances = room.memory.sourceDistances;
+    if (!distances)
+        return room.energyAvailable;
+    const sources = room.find(FIND_SOURCES);
+    if (sources.length === 0)
+        return room.energyAvailable;
+    let total = 0, count = 0;
+    for (const src of sources) {
+        const d = distances[src.id];
+        if (d) {
+            total += d;
+            count++;
+        }
+    }
+    if (count === 0)
+        return room.energyAvailable;
+    const avgDist = total / count;
+    const multiplier = 1.3;
+    const carryNeeded = avgDist * multiplier * 20; // energy capacity needed per trip
+    const units = Math.max(1, Math.ceil(carryNeeded / 100)); // 100e carry per unit
+    const ideal = Math.min(units * 150, room.energyCapacityAvailable);
+    return Math.min(ideal, room.energyAvailable);
+}
 
 const MAX_ROAD_SITES = 10;
 function manageConstruction(room) {
@@ -1685,7 +2716,7 @@ function manageConstruction(room) {
         placeSpawnIfMissing(room);
         return;
     }
-    if (Game.time % 5 === 0)
+    if (period(5, 'construction:prune'))
         pruneExcessRoadSites(room);
     maintainRoadQueue(room);
     if (Memory.roadsPlanned && Memory.lastRCL === rcl)
@@ -1952,29 +2983,31 @@ function placeRamparts(room) {
 //
 // DIRECT  — all platoons take the shortest path. Used when only one platoon
 //           is available or no viable flank room exists.
-const ESTIMATED_TRAVEL_TICKS = 40; // ticks to reach adjacent enemy room
-const FEINT_DURATION_TICKS = 150; // how long the feint platoon attacks before retreating
-const MAIN_DELAY_TICKS = 80; // main platoon waits this many ticks into the feint
-function manageTactics() {
-    if (Memory.combatState !== 'MARCH') {
-        // Clear orders when not marching so they don't linger into the next RUSH
-        if (Memory.combatState === 'RALLY') {
-            Memory.platoonOrders = undefined;
-            Memory.coordinatedAttackTick = undefined;
+const ESTIMATED_TRAVEL_TICKS = 40;
+const FEINT_DURATION_TICKS = 150;
+const MAIN_DELAY_TICKS = 80;
+// Called per room — plans tactics only for combat units homed in this room.
+function manageTactics(room) {
+    var _a;
+    const state = (_a = room.memory.combatState) !== null && _a !== void 0 ? _a : 'RALLY';
+    if (state !== 'MARCH') {
+        if (state === 'RALLY') {
+            room.memory.platoonOrders = undefined;
+            room.memory.coordinatedAttackTick = undefined;
         }
         return;
     }
-    if (!Memory.enemyRoomName)
+    if (!room.memory.enemyRoomName)
         return;
-    if (Memory.platoonOrders)
+    if (room.memory.platoonOrders)
         return; // already planned this MARCH
-    const platoons = getActivePlatoonIds();
+    const platoons = getActivePlatoonIds(room.name);
     if (platoons.length === 0)
         return;
-    const orders = planTactics(platoons, Memory.enemyRoomName);
-    Memory.platoonOrders = Object.fromEntries(Object.entries(orders).map(([id, o]) => [id, o]));
+    const orders = planTactics(platoons, room.memory.enemyRoomName);
+    room.memory.platoonOrders = Object.fromEntries(Object.entries(orders).map(([id, o]) => [id, o]));
     const tactics = Object.values(orders).map(o => o.tactic).join(', ');
-    console.log(`[adaptive] Tactics assigned: [${tactics}] vs ${Memory.enemyRoomName}`);
+    console.log(`[${room.name}] Tactics assigned: [${tactics}] vs ${room.memory.enemyRoomName}`);
 }
 // ─── Planning ─────────────────────────────────────────────────────────────────
 function planTactics(platoons, enemyRoom) {
@@ -1983,11 +3016,9 @@ function planTactics(platoons, enemyRoom) {
     const hasTowers = ((_b = intel === null || intel === void 0 ? void 0 : intel.enemyTowers) !== null && _b !== void 0 ? _b : 0) > 0;
     const flankRoom = findFlankRoom(enemyRoom);
     if (platoons.length === 1 || !flankRoom) {
-        // Single platoon or no flank available — everyone direct
         return Object.fromEntries(platoons.map(id => [id, { tactic: 'DIRECT' }]));
     }
     if (platoons.length >= 2 && hasTowers) {
-        // FEINT + MAIN: towers are a serious threat — use misdirection
         const feintId = platoons[0];
         const mainId = platoons[1];
         return {
@@ -2000,56 +3031,196 @@ function planTactics(platoons, enemyRoom) {
                 waypointRoom: flankRoom,
                 engageTick: Game.time + ESTIMATED_TRAVEL_TICKS + MAIN_DELAY_TICKS,
             },
-            // Any additional platoons also go direct
             ...Object.fromEntries(platoons.slice(2).map(id => [id, { tactic: 'DIRECT' }])),
         };
     }
-    // PINCER: multiple platoons, no towers — enter from different sides
     return {
         [platoons[0]]: { tactic: 'DIRECT' },
         [platoons[1]]: { tactic: 'FLANK', waypointRoom: flankRoom },
         ...Object.fromEntries(platoons.slice(2).map(id => [id, { tactic: 'DIRECT' }])),
     };
 }
-// Find a room adjacent to the enemy that we can use as a flanking approach.
-// Exclude our own home room (that's the direct route).
 function findFlankRoom(enemyRoom) {
-    var _a, _b;
+    var _a;
     const exits = Game.map.describeExits(enemyRoom);
     if (!exits)
         return null;
-    const homeRoom = (_a = Object.keys(Game.rooms).find(r => { var _a; return (_a = Game.rooms[r].controller) === null || _a === void 0 ? void 0 : _a.my; })) !== null && _a !== void 0 ? _a : '';
+    const homeRooms = new Set(Object.keys(Game.rooms).filter(r => { var _a; return (_a = Game.rooms[r].controller) === null || _a === void 0 ? void 0 : _a.my; }));
     const candidates = Object.values(exits).filter(Boolean)
-        .filter(r => r !== homeRoom && Game.map.getRoomStatus(r).status === 'normal');
-    return (_b = candidates[0]) !== null && _b !== void 0 ? _b : null;
+        .filter(r => !homeRooms.has(r) && Game.map.getRoomStatus(r).status === 'normal');
+    return (_a = candidates[0]) !== null && _a !== void 0 ? _a : null;
 }
-function getActivePlatoonIds() {
+// Only platoons whose fighters are homed in this room.
+function getActivePlatoonIds(homeRoom) {
     const ids = new Set();
     for (const name in Game.creeps) {
-        const pid = Game.creeps[name].memory.platoonId;
-        const role = Game.creeps[name].memory.role;
-        if (pid && (role === 'warrior' || role === 'ranger')) {
+        const creep = Game.creeps[name];
+        const pid = creep.memory.platoonId;
+        const role = creep.memory.role;
+        if (pid && (role === 'warrior' || role === 'ranger') && creep.memory.homeRoom === homeRoom) {
             ids.add(pid);
         }
     }
-    return [...ids].sort(); // deterministic order
+    return [...ids].sort();
 }
 
-const MIN_FIGHTERS_TO_MARCH = 4; // warriors + rangers before marching
-const MIN_HEALERS_TO_MARCH = 1; // at least one healer per group before marching
+// Quad squad manager.
+// Forms 4-creep attack groups (2 warriors + 2 rangers) for coordinated assault.
+//
+// Advantages over individual platoons:
+//  - Focused fire drains one tower at a time (empty tower = neutralized)
+//  - Mutual ranged-heal keeps the quad alive much longer
+//  - Combined body parts survive damage that would kill any individual
+//
+// Quad states follow room.memory.combatState (RALLY/MARCH/ENGAGE).
+// Each quad has a leader (isQuadLeader=true) who picks targets.
+// Non-leaders move to stay within 2 tiles of the leader.
+function manageQuads(room) {
+    var _a, _b;
+    if (((_a = room.memory.combatState) !== null && _a !== void 0 ? _a : 'RALLY') === 'RALLY') {
+        formQuads(room);
+    }
+    // MARCH/ENGAGE: individual roles handle movement, quadManager handles targeting
+    if (((_b = room.memory.combatState) !== null && _b !== void 0 ? _b : 'RALLY') !== 'RALLY') {
+        coordinateQuadTargets(room);
+    }
+}
+// ─── Formation ────────────────────────────────────────────────────────────────
+// Groups unassigned fighters into quads when enough units are available.
+function formQuads(room) {
+    const fighters = room.find(FIND_MY_CREEPS, {
+        filter: c => (c.memory.role === 'warrior' || c.memory.role === 'ranger') &&
+            c.memory.homeRoom === room.name &&
+            !c.memory.quadId,
+    });
+    const warriors = fighters.filter(c => c.memory.role === 'warrior');
+    const rangers = fighters.filter(c => c.memory.role === 'ranger');
+    // Form quads as long as we have 2 warriors + 2 rangers available
+    let quadIndex = nextQuadIndex(room.name);
+    while (warriors.length >= 2 && rangers.length >= 2) {
+        const quadId = `quad_${room.name}_${quadIndex++}`;
+        const members = [
+            warriors.splice(0, 2),
+            rangers.splice(0, 2),
+        ].flat();
+        members[0].memory.quadId = quadId;
+        members[0].memory.isQuadLeader = true;
+        for (const m of members.slice(1)) {
+            m.memory.quadId = quadId;
+            m.memory.isQuadLeader = false;
+        }
+    }
+}
+function nextQuadIndex(roomName) {
+    var _a;
+    let max = 0;
+    for (const name in Game.creeps) {
+        const qid = Game.creeps[name].memory.quadId;
+        if (qid && qid.startsWith(`quad_${roomName}_`)) {
+            const n = parseInt((_a = qid.split('_').pop()) !== null && _a !== void 0 ? _a : '0', 10);
+            if (n >= max)
+                max = n + 1;
+        }
+    }
+    return max;
+}
+// ─── Coordinated targeting ───────────────────────────────────────────────────
+// All members of a quad focus the same target — the tower with lowest energy first
+// (drain it completely → neutralize it), then enemy creeps, then spawns.
+function coordinateQuadTargets(room) {
+    const quadIds = new Set();
+    for (const name in Game.creeps) {
+        const qid = Game.creeps[name].memory.quadId;
+        if (qid)
+            quadIds.add(qid);
+    }
+    for (const quadId of quadIds) {
+        const members = Object.values(Game.creeps).filter(c => c.memory.quadId === quadId);
+        const leader = members.find(c => c.memory.isQuadLeader);
+        if (!leader || leader.room.name !== room.name)
+            continue;
+        const target = pickQuadTarget(leader.room);
+        if (!target)
+            continue;
+        // Share the target ID with all quad members so they all focus it
+        for (const m of members) {
+            m.memory.targetId = target.id;
+        }
+    }
+}
+// Tower with lowest energy (drain focus) → hostile creep (most ATTACK parts) → spawn → structure
+function pickQuadTarget(room) {
+    var _a;
+    const towers = room.find(FIND_HOSTILE_STRUCTURES, {
+        filter: s => s.structureType === STRUCTURE_TOWER,
+    });
+    if (towers.length > 0) {
+        // Target the least-charged tower — empty towers are fully neutralized
+        return towers.reduce((a, b) => a.store[RESOURCE_ENERGY] < b.store[RESOURCE_ENERGY] ? a : b);
+    }
+    const creeps = room.find(FIND_HOSTILE_CREEPS);
+    if (creeps.length > 0) {
+        return creeps.reduce((a, b) => threatScore$1(b) > threatScore$1(a) ? b : a);
+    }
+    const spawns = room.find(FIND_HOSTILE_STRUCTURES, {
+        filter: s => s.structureType === STRUCTURE_SPAWN,
+    });
+    if (spawns.length > 0)
+        return spawns[0];
+    return (_a = room.find(FIND_HOSTILE_STRUCTURES)[0]) !== null && _a !== void 0 ? _a : null;
+}
+function threatScore$1(c) {
+    return c.body.reduce((n, p) => {
+        if (p.type === ATTACK)
+            return n + 3;
+        if (p.type === RANGED_ATTACK)
+            return n + 2;
+        if (p.type === HEAL)
+            return n + 1;
+        return n;
+    }, 0);
+}
+
+const MIN_FIGHTERS_TO_MARCH = 3;
+const MIN_HEALERS_TO_MARCH = 1;
+const RAID_STRENGTH_MAX = 15; // raid without healer if enemy this weak
 const REASSESS_INTERVAL = 500;
-// Safe mode triggers when hostiles are attacking AND defenses are critically low.
-// activateSafeMode() uses one existing charge (no ghodium needed to activate, only to recharge).
 const SAFE_MODE_RAMPART_THRESHOLD = 5000;
 const SAFE_MODE_OVERWHELM_COUNT = 5;
+// Decay limit from screeps-quorum/fortify.js: ramparts below this are treated as
+// emergencies and repaired before any other structure.
+const RAMPART_DECAY_LIMIT = 30000;
+const FORTIFY_CACHE_TICKS = 50;
+// ─── Tower falloff tables (Quorum: src/programs/city/defense.js) ─────────────
+// Pre-computed once per global reset; indexed by tile distance (0–49).
+// Avoids repeated floating-point math in the hot tower-targeting path.
+const TOWER_DMG_AT = [];
+const TOWER_HEAL_AT = [];
+function initTowerTables() {
+    if (TOWER_DMG_AT.length > 0)
+        return;
+    for (let d = 0; d < 50; d++) {
+        TOWER_DMG_AT[d] = towerEffect(TOWER_POWER_ATTACK, d);
+        TOWER_HEAL_AT[d] = towerEffect(TOWER_POWER_HEAL, d);
+    }
+}
+function towerEffect(power, distance) {
+    if (distance <= TOWER_OPTIMAL_RANGE)
+        return power;
+    const d = Math.min(distance, TOWER_FALLOFF_RANGE);
+    return Math.floor(power - power * TOWER_FALLOFF * (d - TOWER_OPTIMAL_RANGE) / (TOWER_FALLOFF_RANGE - TOWER_OPTIMAL_RANGE));
+}
+// ─── Public entry ─────────────────────────────────────────────────────────────
 function manageCombat(room) {
     checkSafeMode(room);
     manageTowers(room);
     manageCombatState(room);
-    manageTactics(); // assigns platoon orders when MARCH begins
+    manageTactics(room);
+    manageQuads(room);
 }
 // ─── Safe mode ────────────────────────────────────────────────────────────────
 function checkSafeMode(room) {
+    var _a;
     const ctrl = room.controller;
     if (!ctrl || ctrl.safeMode || !ctrl.safeModeAvailable)
         return;
@@ -2062,90 +3233,164 @@ function checkSafeMode(room) {
     const criticalRampart = ramparts.length > 0 &&
         Math.min(...ramparts.map(r => r.hits)) < SAFE_MODE_RAMPART_THRESHOLD;
     const overwhelmed = dangerousHostiles.length >= SAFE_MODE_OVERWHELM_COUNT;
-    if (criticalRampart || overwhelmed) {
-        ctrl.activateSafeMode();
-        console.log(`[adaptive] ⚠️ SAFE MODE ACTIVATED (hostiles=${dangerousHostiles.length} criticalRampart=${criticalRampart})`);
+    if (!criticalRampart && !overwhelmed)
+        return;
+    // Quorum safemode priority guard: if a higher-RCL owned room still has charges,
+    // withhold ours — ghodium is scarce and more valuable rooms need protection first.
+    const myRcl = (_a = ctrl.level) !== null && _a !== void 0 ? _a : 0;
+    const betterRoomHasCharges = Object.values(Game.rooms).some(r => {
+        var _a, _b, _c, _d, _e;
+        return r.name !== room.name &&
+            ((_a = r.controller) === null || _a === void 0 ? void 0 : _a.my) &&
+            ((_c = (_b = r.controller) === null || _b === void 0 ? void 0 : _b.level) !== null && _c !== void 0 ? _c : 0) > myRcl &&
+            ((_e = (_d = r.controller) === null || _d === void 0 ? void 0 : _d.safeModeAvailable) !== null && _e !== void 0 ? _e : 0) > 0;
+    });
+    if (betterRoomHasCharges) {
+        console.log(`[${room.name}] Safemode withheld — higher-RCL room has charges`);
+        return;
     }
+    ctrl.activateSafeMode();
+    console.log(`[${room.name}] SAFE MODE ACTIVATED (hostiles=${dangerousHostiles.length} criticalRampart=${criticalRampart})`);
 }
 // ─── Tower management ────────────────────────────────────────────────────────
-// Attack the enemy with the most ATTACK body parts (biggest threat) when under siege.
-// When clear, repair the most-damaged owned structure.
 function manageTowers(room) {
     const towers = room.find(FIND_MY_STRUCTURES, {
         filter: s => s.structureType === STRUCTURE_TOWER,
     });
-    for (const tower of towers) {
-        if (tower.store[RESOURCE_ENERGY] < 10)
-            continue;
-        const hostiles = room.find(FIND_HOSTILE_CREEPS);
-        if (hostiles.length > 0) {
-            // Target the most dangerous creep (most ATTACK/RANGED_ATTACK parts)
-            const target = hostiles.reduce((a, b) => threatScore(b) > threatScore(a) ? b : a);
+    if (towers.length === 0)
+        return;
+    initTowerTables();
+    const hostiles = room.find(FIND_HOSTILE_CREEPS);
+    if (hostiles.length > 0) {
+        // Falloff-aware targeting: pick healer priority, then the target our
+        // towers collectively deal the most damage to at their actual distances.
+        const target = chooseTowerTarget(towers, hostiles);
+        for (const tower of towers) {
+            if (tower.store[RESOURCE_ENERGY] < TOWER_ENERGY_COST)
+                continue;
             tower.attack(target);
-            continue;
         }
-        // No enemies — repair most-damaged owned structure
-        const damaged = room.find(FIND_MY_STRUCTURES, {
-            filter: s => s.hits < s.hitsMax * 0.9,
-        });
-        if (damaged.length > 0) {
-            const worst = damaged.reduce((a, b) => a.hits < b.hits ? a : b);
-            tower.repair(worst);
+        return;
+    }
+    // No hostiles: heal the most-damaged friendly creep.
+    // Quorum pattern: accumulate heal from successive towers and break early
+    // once remaining damage is covered — prevents wasting energy on a creep
+    // that's already fully covered by earlier towers in the list.
+    const myCreeps = room.find(FIND_MY_CREEPS);
+    const damaged = myCreeps.filter(c => c.hits < c.hitsMax);
+    if (damaged.length > 0) {
+        const target = damaged.reduce((a, b) => (a.hitsMax - a.hits) > (b.hitsMax - b.hits) ? a : b);
+        let remaining = target.hitsMax - target.hits;
+        for (const tower of towers) {
+            if (remaining <= 0)
+                break;
+            if (tower.store[RESOURCE_ENERGY] < TOWER_ENERGY_COST)
+                continue;
+            const d = Math.min(tower.pos.getRangeTo(target), 49);
+            remaining -= TOWER_HEAL_AT[d];
+            tower.heal(target);
+        }
+        return;
+    }
+    // No hostiles, no damaged creeps: repair the highest-priority rampart.
+    const fortifyTarget = getFortifyTarget(room);
+    if (fortifyTarget) {
+        for (const tower of towers) {
+            if (tower.store[RESOURCE_ENERGY] < TOWER_ENERGY_COST)
+                continue;
+            tower.repair(fortifyTarget);
         }
     }
 }
-function threatScore(creep) {
-    return creep.body.reduce((n, p) => {
-        if (p.type === ATTACK)
-            return n + 3;
-        if (p.type === RANGED_ATTACK)
-            return n + 2;
-        if (p.type === WORK)
-            return n + 1; // can dismantle structures
-        return n;
-    }, 0);
+// Healer priority — killing regeneration multiplies effective tower DPS.
+// Within each pool, pick the target our towers collectively deal most damage to
+// (falloff-weighted sum across all towers at their actual distances).
+function chooseTowerTarget(towers, hostiles) {
+    const healers = hostiles.filter(c => c.body.some(p => p.type === HEAL && p.hits > 0));
+    const pool = healers.length > 0 ? healers : hostiles;
+    let best = pool[0];
+    let bestDmg = -1;
+    for (const hostile of pool) {
+        let totalDmg = 0;
+        for (const tower of towers) {
+            const d = Math.min(tower.pos.getRangeTo(hostile), 49);
+            totalDmg += TOWER_DMG_AT[d];
+        }
+        if (totalDmg > bestDmg) {
+            bestDmg = totalDmg;
+            best = hostile;
+        }
+    }
+    return best;
 }
-// ─── Combat state machine ─────────────────────────────────────────────────────
-function manageCombatState(room) {
+// ─── Decay-first rampart repair (Quorum: src/programs/city/fortify.js) ───────
+// Priority: decaying (< 30k hits) sorted ascending → then lowest hits overall.
+// Result cached for 50 ticks to avoid O(n) find every tick.
+function getFortifyTarget(room) {
     var _a;
+    const cached = room.memory.fortifyTarget
+        ? Game.getObjectById(room.memory.fortifyTarget)
+        : null;
+    if (cached && Game.time - ((_a = room.memory.fortifyTargetTick) !== null && _a !== void 0 ? _a : 0) < FORTIFY_CACHE_TICKS) {
+        return cached;
+    }
+    const ramparts = room.find(FIND_MY_STRUCTURES, {
+        filter: s => s.structureType === STRUCTURE_RAMPART,
+    });
+    if (ramparts.length === 0)
+        return null;
+    const decaying = ramparts.filter(r => r.hits <= RAMPART_DECAY_LIMIT);
+    const target = decaying.length > 0
+        ? decaying.reduce((a, b) => a.hits < b.hits ? a : b)
+        : ramparts.reduce((a, b) => a.hits < b.hits ? a : b);
+    room.memory.fortifyTarget = target.id;
+    room.memory.fortifyTargetTick = Game.time;
+    return target;
+}
+// ─── Per-room combat state machine ───────────────────────────────────────────
+function manageCombatState(room) {
+    var _a, _b;
     const allCombat = room.find(FIND_MY_CREEPS, {
-        filter: c => c.memory.role === 'warrior' || c.memory.role === 'ranger' || c.memory.role === 'healer',
+        filter: c => (c.memory.role === 'warrior' || c.memory.role === 'ranger' || c.memory.role === 'healer') &&
+            c.memory.homeRoom === room.name,
     });
     const fighters = allCombat.filter(c => c.memory.role === 'warrior' || c.memory.role === 'ranger');
     const healers = allCombat.filter(c => c.memory.role === 'healer');
-    const state = (_a = Memory.combatState) !== null && _a !== void 0 ? _a : 'RALLY';
+    const state = (_a = room.memory.combatState) !== null && _a !== void 0 ? _a : 'RALLY';
+    const enemyRoom = room.memory.enemyRoomName;
     switch (state) {
-        case 'RALLY':
-            // Wait for enough fighters AND at least one healer before marching
-            if (fighters.length >= MIN_FIGHTERS_TO_MARCH &&
-                healers.length >= MIN_HEALERS_TO_MARCH &&
-                Memory.enemyRoomName) {
-                Memory.combatState = 'MARCH';
-                Memory.rallyTick = Game.time;
-                assignTargetRoom(allCombat, Memory.enemyRoomName);
-                console.log(`[adaptive] Combat → MARCH (${fighters.length} fighters + ${healers.length} healers → ${Memory.enemyRoomName})`);
+        case 'RALLY': {
+            const isRaidTarget = ((_b = room.memory.enemyStrength) !== null && _b !== void 0 ? _b : 999) <= RAID_STRENGTH_MAX;
+            const healerReady = healers.length >= MIN_HEALERS_TO_MARCH;
+            if (fighters.length >= MIN_FIGHTERS_TO_MARCH && (healerReady || isRaidTarget) && enemyRoom) {
+                room.memory.combatState = 'MARCH';
+                room.memory.rallyTick = Game.time;
+                assignTargetRoom(allCombat, enemyRoom);
+                const mode = healerReady ? `${healers.length}h` : 'RAID';
+                console.log(`[${room.name}] Combat → MARCH (${fighters.length}f ${mode} → ${enemyRoom})`);
             }
             break;
+        }
         case 'MARCH': {
             if (fighters.length === 0) {
-                Memory.combatState = 'RALLY';
+                room.memory.combatState = 'RALLY';
                 break;
             }
-            const inEnemyRoom = fighters.filter(c => c.room.name === Memory.enemyRoomName);
+            const inEnemyRoom = fighters.filter(c => c.room.name === enemyRoom);
             if (inEnemyRoom.length > 0) {
-                Memory.combatState = 'ENGAGE';
-                console.log('[adaptive] Combat → ENGAGE');
+                room.memory.combatState = 'ENGAGE';
+                console.log(`[${room.name}] Combat → ENGAGE`);
             }
             break;
         }
         case 'ENGAGE':
             if (fighters.length === 0) {
-                Memory.combatState = 'RALLY';
-                console.log('[adaptive] Combat → RALLY (all fighters lost)');
+                room.memory.combatState = 'RALLY';
+                console.log(`[${room.name}] Combat → RALLY (all fighters lost)`);
             }
-            if (Memory.rallyTick && Game.time - Memory.rallyTick > REASSESS_INTERVAL) {
-                Memory.scoutTick = undefined;
-                Memory.rallyTick = Game.time;
+            if (room.memory.rallyTick && Game.time - room.memory.rallyTick > REASSESS_INTERVAL) {
+                room.memory.scoutTick = undefined;
+                room.memory.rallyTick = Game.time;
             }
             break;
     }
@@ -2153,6 +3398,170 @@ function manageCombatState(room) {
 function assignTargetRoom(units, roomName) {
     for (const u of units)
         u.memory.targetRoomName = roomName;
+}
+
+// Multi-room defense coordinator.
+//
+// Runs once per owned room per tick. Maintains Memory.roomThreats:
+//   WARNING  — scout intel shows enemy combat creeps in an adjacent room
+//   ACTIVE   — dangerous hostiles are physically inside this room right now
+//
+// When a room goes ACTIVE, any combat units that are currently rallying in a
+// safe room (combatState === 'RALLY', not yet on an offensive mission) are
+// dispatched there via creep.memory.defendingRoom. They return home when the
+// threat clears.
+//
+// This layer is orthogonal to the global RALLY/MARCH/ENGAGE offense machine.
+// Offense campaigns continue uninterrupted; only idle (RALLY) units are
+// redirected for defense.
+const THREAT_CLEAR_TICKS = 50; // ticks without hostile sighting before clearing
+const WARNING_MAX_AGE = 100; // scout intel must be this fresh to trigger WARNING
+function manageDefense(room) {
+    if (!Memory.roomThreats)
+        Memory.roomThreats = {};
+    detectActiveThreats(room);
+    checkEarlyWarnings(room);
+    dispatchAndRecall();
+}
+// ─── Threat detection ─────────────────────────────────────────────────────────
+function detectActiveThreats(room) {
+    var _a;
+    const hostiles = room.find(FIND_HOSTILE_CREEPS, {
+        filter: c => c.body.some(p => p.type === ATTACK || p.type === RANGED_ATTACK || p.type === WORK),
+    });
+    if (hostiles.length > 0) {
+        const str = hostiles.reduce((s, c) => s + threatScore(c), 0);
+        const prev = Memory.roomThreats[room.name];
+        Memory.roomThreats[room.name] = {
+            detectedAt: (_a = prev === null || prev === void 0 ? void 0 : prev.detectedAt) !== null && _a !== void 0 ? _a : Game.time,
+            lastSeenAt: Game.time,
+            hostileCount: hostiles.length,
+            strength: str,
+            severity: 'ACTIVE',
+            fromRoom: prev === null || prev === void 0 ? void 0 : prev.fromRoom,
+        };
+        if (!prev || prev.severity !== 'ACTIVE') {
+            console.log(`[defense] ⚠️ ACTIVE in ${room.name}: ${hostiles.length} hostiles str=${str}`);
+        }
+        return;
+    }
+    // No hostiles — age out ACTIVE threats
+    const prev = Memory.roomThreats[room.name];
+    if ((prev === null || prev === void 0 ? void 0 : prev.severity) === 'ACTIVE' && Game.time - prev.lastSeenAt > THREAT_CLEAR_TICKS) {
+        delete Memory.roomThreats[room.name];
+        console.log(`[defense] ✓ Threat cleared in ${room.name}`);
+    }
+}
+// ─── Early warning ────────────────────────────────────────────────────────────
+// Uses recent scout intel to warn before enemies enter our room.
+function checkEarlyWarnings(room) {
+    var _a, _b, _c, _d, _e;
+    // Don't downgrade an ACTIVE threat to a WARNING
+    if (((_a = Memory.roomThreats[room.name]) === null || _a === void 0 ? void 0 : _a.severity) === 'ACTIVE')
+        return;
+    const exits = Game.map.describeExits(room.name);
+    if (!exits)
+        return;
+    const intel = (_b = Memory.roomIntel) !== null && _b !== void 0 ? _b : {};
+    let bestNeighbor;
+    let bestStrength = 0;
+    for (const neighbor of Object.values(exits)) {
+        if (!neighbor)
+            continue;
+        const data = intel[neighbor];
+        if (!data)
+            continue;
+        if (Game.time - data.scannedAt > WARNING_MAX_AGE)
+            continue; // stale intel
+        if (data.enemyCreeps === 0)
+            continue;
+        if (data.strength > bestStrength) {
+            bestStrength = data.strength;
+            bestNeighbor = neighbor;
+        }
+    }
+    if (bestNeighbor) {
+        const prev = Memory.roomThreats[room.name];
+        Memory.roomThreats[room.name] = {
+            detectedAt: (_c = prev === null || prev === void 0 ? void 0 : prev.detectedAt) !== null && _c !== void 0 ? _c : Game.time,
+            lastSeenAt: Game.time,
+            hostileCount: (_e = (_d = intel[bestNeighbor]) === null || _d === void 0 ? void 0 : _d.enemyCreeps) !== null && _e !== void 0 ? _e : 0,
+            strength: bestStrength,
+            severity: 'WARNING',
+            fromRoom: bestNeighbor,
+        };
+        if (!prev) {
+            console.log(`[defense] ⚡ WARNING for ${room.name}: enemy movement in ${bestNeighbor} str=${bestStrength}`);
+        }
+        return;
+    }
+    // No warning found — age out stale WARNINGs
+    const prev = Memory.roomThreats[room.name];
+    if ((prev === null || prev === void 0 ? void 0 : prev.severity) === 'WARNING' && Game.time - prev.lastSeenAt > THREAT_CLEAR_TICKS) {
+        delete Memory.roomThreats[room.name];
+    }
+}
+// ─── Dispatch & recall ────────────────────────────────────────────────────────
+// Iterates all creeps globally. Called multiple times per tick (once per owned room)
+// but is idempotent — already-dispatched units are skipped.
+function dispatchAndRecall() {
+    var _a, _b, _c, _d, _e;
+    const threats = (_a = Memory.roomThreats) !== null && _a !== void 0 ? _a : {};
+    // Recall defenders whose threat has resolved
+    for (const creep of Object.values(Game.creeps)) {
+        const assigned = creep.memory.defendingRoom;
+        if (!assigned)
+            continue;
+        if (((_b = threats[assigned]) === null || _b === void 0 ? void 0 : _b.severity) === 'ACTIVE')
+            continue;
+        // Threat gone — send home
+        console.log(`[defense] Recalling ${creep.name} from ${assigned} → ${(_c = creep.memory.homeRoom) !== null && _c !== void 0 ? _c : 'unknown'}`);
+        creep.memory.defendingRoom = undefined;
+        creep.memory.targetRoomName = creep.memory.homeRoom;
+    }
+    // Dispatch idle units to active threats
+    const activeThreats = Object.entries(threats).filter(([, t]) => t.severity === 'ACTIVE');
+    if (activeThreats.length === 0)
+        return;
+    for (const [threatenedRoom] of activeThreats) {
+        for (const creep of Object.values(Game.creeps)) {
+            if (creep.memory.role !== 'warrior' &&
+                creep.memory.role !== 'ranger' &&
+                creep.memory.role !== 'healer')
+                continue;
+            if (creep.memory.defendingRoom)
+                continue; // already on a mission
+            if (!creep.memory.homeRoom)
+                continue; // no homeRoom — legacy creep, skip
+            // Only dispatch from rooms that are not themselves under active threat
+            if (((_d = threats[creep.memory.homeRoom]) === null || _d === void 0 ? void 0 : _d.severity) === 'ACTIVE')
+                continue;
+            // Only dispatch units currently in their home room (they're in RALLY state)
+            if (creep.room.name !== creep.memory.homeRoom)
+                continue;
+            // Don't pull from an active offense campaign in the creep's home room
+            const homeState = creep.memory.homeRoom
+                ? (_e = Game.rooms[creep.memory.homeRoom]) === null || _e === void 0 ? void 0 : _e.memory.combatState
+                : undefined;
+            if (homeState && homeState !== 'RALLY')
+                continue;
+            creep.memory.defendingRoom = threatenedRoom;
+            creep.memory.targetRoomName = threatenedRoom;
+            console.log(`[defense] Dispatching ${creep.name} (${creep.memory.role}) ${creep.memory.homeRoom} → ${threatenedRoom}`);
+        }
+    }
+}
+// ─── Helpers ─────────────────────────────────────────────────────────────────
+function threatScore(creep) {
+    return creep.body.reduce((n, p) => {
+        if (p.type === ATTACK)
+            return n + 3;
+        if (p.type === RANGED_ATTACK)
+            return n + 2;
+        if (p.type === WORK)
+            return n + 1;
+        return n;
+    }, 0);
 }
 
 // Manages StructureLink energy transfers.
@@ -2200,7 +3609,7 @@ function manageMarket(room) {
         return;
     if (room.terminal.cooldown > 0)
         return;
-    if (Game.time % CHECK_INTERVAL !== 0)
+    if (!period(CHECK_INTERVAL, 'market:check'))
         return;
     const ctrl = room.controller;
     if (!ctrl)
@@ -2237,22 +3646,153 @@ function manageMarket(room) {
     }
 }
 
-// Logs a compact snapshot every REPORT_INTERVAL ticks AND writes to a rolling
-// in-memory log at LOG_INTERVAL ticks.
+// Inter-room energy balancing.
+// Identifies rooms with surplus energy and rooms in deficit, then spawns couriers
+// to physically carry energy until RCL 6+ terminals are available.
 //
-// To dump history from the Screeps console:
-//   JSON.stringify(Memory.statsLog)
+// Each tick this runs per room and writes room.memory.energySurplus.
+// Spawning couriers is handled by spawnManager reading that value.
+const SURPLUS_THRESHOLD = 100000; // storage energy above this = surplus
+const DEFICIT_THRESHOLD = 10000; // storage energy below this = deficit
+const TERMINAL_RCL = 6; // at this RCL, use terminal transfers instead
+function manageTransfers(room) {
+    if (!room.controller)
+        return;
+    const rcl = room.controller.level;
+    const storage = room.storage;
+    // Compute and publish this room's surplus for spawnManager to read
+    if (storage) {
+        const energy = storage.store[RESOURCE_ENERGY];
+        room.memory.energySurplus = energy > SURPLUS_THRESHOLD ? energy - SURPLUS_THRESHOLD : 0;
+    }
+    else {
+        room.memory.energySurplus = 0;
+    }
+    // At RCL 6+, terminals handle inter-room transfers — use them if both rooms have terminals
+    if (rcl >= TERMINAL_RCL) {
+        manageTerminalTransfers(room);
+    }
+}
+function manageTerminalTransfers(room) {
+    const terminal = room.terminal;
+    if (!terminal || terminal.cooldown > 0)
+        return;
+    if (terminal.store[RESOURCE_ENERGY] < 1000)
+        return;
+    // Find another owned room with low energy that has a terminal
+    const deficitRoom = Object.values(Game.rooms).find(r => {
+        var _a;
+        return r.name !== room.name &&
+            ((_a = r.controller) === null || _a === void 0 ? void 0 : _a.my) &&
+            r.controller.level >= TERMINAL_RCL &&
+            r.terminal &&
+            r.storage &&
+            r.storage.store[RESOURCE_ENERGY] < DEFICIT_THRESHOLD;
+    });
+    if (!deficitRoom || !deficitRoom.terminal)
+        return;
+    // Send 5000 energy — leave some for the terminal itself
+    const sendAmount = Math.min(5000, terminal.store[RESOURCE_ENERGY] - 500);
+    if (sendAmount <= 0)
+        return;
+    const result = terminal.send(RESOURCE_ENERGY, sendAmount, deficitRoom.name);
+    if (result === OK) {
+        console.log(`[${room.name}] Terminal → ${deficitRoom.name}: ${sendAmount}e`);
+    }
+}
+
+// Remote mining manager.
+// Identifies adjacent rooms suitable for reservation + harvesting, computes how many
+// remote miners and haulers are needed (distance-based), and publishes spawn targets
+// to room.memory.remoteRooms for spawnManager to act on.
 //
-// To get a specific field across history:
-//   Memory.statsLog.map(s => [s.tick, s.rcl, s.energy.avail])
-const REPORT_INTERVAL = 50; // console print frequency
-const LOG_INTERVAL = 200; // Memory.statsLog write frequency
-const LOG_MAX_ENTRIES = 500; // rolling window (~100k ticks at LOG_INTERVAL=200)
+// Remote rooms are processed in priority order: closest (linear distance = 1) first,
+// then rooms with more sources.
+const MAX_REMOTE_ROOMS = 3; // cap: CPU scales with remote rooms
+const MIN_MINER_RCL = 2; // RCL 2 has containers + haulers — remote mining helps economy
+function manageRemote(room) {
+    var _a, _b;
+    if (((_b = (_a = room.controller) === null || _a === void 0 ? void 0 : _a.level) !== null && _b !== void 0 ? _b : 0) < MIN_MINER_RCL)
+        return;
+    if (!room.memory.remoteRooms)
+        room.memory.remoteRooms = {};
+    // Find candidate rooms: adjacent, neutral, not already owned
+    const candidates = findCandidateRooms(room);
+    // Trim to top MAX_REMOTE_ROOMS by source count desc
+    const chosen = candidates.slice(0, MAX_REMOTE_ROOMS);
+    // Remove stale entries (rooms we no longer want to harvest)
+    const chosenNames = new Set(chosen.map(r => r.name));
+    for (const name of Object.keys(room.memory.remoteRooms)) {
+        if (!chosenNames.has(name))
+            delete room.memory.remoteRooms[name];
+    }
+    // Update spawn targets for each chosen room
+    for (const remote of chosen) {
+        const distanceTiles = estimateRoundTripTiles(room.name, remote.name);
+        const haulerCarry = bestHaulerCarry(room.energyCapacityAvailable);
+        // Each source produces ~10e/tick; miners * round-trip determines hauler count
+        const haulersNeeded = Math.ceil(10 * distanceTiles * remote.sources / haulerCarry);
+        room.memory.remoteRooms[remote.name] = {
+            sources: remote.sources,
+            miners: remote.sources, // 1 big miner per source
+            haulers: Math.max(1, haulersNeeded),
+            reservedUntil: remote.reservedUntil,
+        };
+    }
+}
+function findCandidateRooms(home) {
+    var _a, _b, _c, _d, _e, _f, _g;
+    const exits = Game.map.describeExits(home.name);
+    if (!exits)
+        return [];
+    const ownedNames = new Set(Object.values(Game.rooms)
+        .filter(r => { var _a; return (_a = r.controller) === null || _a === void 0 ? void 0 : _a.my; })
+        .map(r => r.name));
+    const candidates = [];
+    for (const roomName of Object.values(exits).filter((n) => !!n)) {
+        if (ownedNames.has(roomName))
+            continue;
+        if (Game.map.getRoomStatus(roomName).status !== 'normal')
+            continue;
+        const intel = (_a = Memory.roomIntel) === null || _a === void 0 ? void 0 : _a[roomName];
+        // Skip if last scan showed an enemy owner (don't try to harvest occupied rooms)
+        if (intel === null || intel === void 0 ? void 0 : intel.controllerOwned)
+            continue;
+        // Skip if hostile combat creeps spotted recently (< 200t ago)
+        if (intel && intel.enemyCreeps > 0 && Game.time - intel.scannedAt < 200)
+            continue;
+        const ctrl = (_b = Game.rooms[roomName]) === null || _b === void 0 ? void 0 : _b.controller;
+        const reservedUntil = (_d = (_c = ctrl === null || ctrl === void 0 ? void 0 : ctrl.reservation) === null || _c === void 0 ? void 0 : _c.ticksToEnd) !== null && _d !== void 0 ? _d : 0;
+        const sources = (_e = intel === null || intel === void 0 ? void 0 : intel.sourceCount) !== null && _e !== void 0 ? _e : ((_g = (_f = Game.rooms[roomName]) === null || _f === void 0 ? void 0 : _f.find(FIND_SOURCES).length) !== null && _g !== void 0 ? _g : 1);
+        candidates.push({ name: roomName, sources, reservedUntil });
+    }
+    // Prefer rooms with more sources, then alphabetical for stability
+    return candidates.sort((a, b) => b.sources - a.sources || a.name.localeCompare(b.name));
+}
+// ─── Distance-based hauler math ───────────────────────────────────────────────
+// Approximate round-trip tile count for a cross-room trip.
+// Adjacent room (linear distance = 1) ≈ 110 tiles round trip on roads.
+function estimateRoundTripTiles(home, remote) {
+    const dist = Game.map.getRoomLinearDistance(home, remote);
+    return (dist * 50 + 5) * 2; // 50 tiles/room + 5 for exits, doubled for return
+}
+// How much energy the best-available hauler body can carry given the room's cap.
+// Mirrors the haulerBody() logic in bodyBuilder.ts: [CC,M] units at 150e each.
+function bestHaulerCarry(energyCap) {
+    const units = Math.min(Math.floor(energyCap / 150), 10);
+    return units * 100; // each CC unit = 100e capacity
+}
+
+// Updated automatically by `just deploy` — do not edit manually
+const REGIME = '2026-06-02-8c691c5';
+
+const REPORT_INTERVAL = 50;
+const LOG_INTERVAL = 200;
+const LOG_MAX_ENTRIES = 500;
 function reportStats(room) {
     var _a, _b, _c, _d, _e, _f, _g, _h, _j, _k, _l, _m, _o;
     const snap = buildSnapshot(room);
-    // Write to rolling memory log (survives disconnect, readable any time)
-    if (Game.time % LOG_INTERVAL === 0) {
+    if (period(LOG_INTERVAL, 'stats:log')) {
         if (!Memory.statsLog)
             Memory.statsLog = [];
         Memory.statsLog.push(snap);
@@ -2260,11 +3800,9 @@ function reportStats(room) {
             Memory.statsLog = Memory.statsLog.slice(-LOG_MAX_ENTRIES);
         }
     }
-    // Print to console for live monitoring
-    if (Game.time % REPORT_INTERVAL !== 0)
+    if (!period(REPORT_INTERVAL, 'stats:report'))
         return;
     const ctrl = room.controller;
-    // Use Game.creeps (global) so warriors/scouts in remote rooms are counted
     const allCreeps = Object.values(Game.creeps);
     const roles = {};
     for (const c of allCreeps)
@@ -2285,7 +3823,7 @@ function reportStats(room) {
     }
     const full = {
         tick: Game.time,
-        phase: (_c = Memory.phase) !== null && _c !== void 0 ? _c : 'ECONOMY',
+        phase: (_c = room.memory.phase) !== null && _c !== void 0 ? _c : 'ECONOMY',
         rcl: (_d = ctrl === null || ctrl === void 0 ? void 0 : ctrl.level) !== null && _d !== void 0 ? _d : 0,
         energy: { avail: room.energyAvailable, cap: room.energyCapacityAvailable, pct: Math.floor(room.energyAvailable / Math.max(room.energyCapacityAvailable, 1) * 100) },
         controller: ctrl ? { pct: Math.floor(ctrl.progress / Math.max(ctrl.progressTotal, 1) * 100), progress: ctrl.progress, total: ctrl.progressTotal } : null,
@@ -2298,16 +3836,23 @@ function reportStats(room) {
             ramparts: { ...sc(STRUCTURE_RAMPART), min_hits: rampartMin },
         },
         sites_total: room.find(FIND_CONSTRUCTION_SITES).length,
-        economy: (_e = Memory.energyStatus) !== null && _e !== void 0 ? _e : null,
-        combat: { state: (_f = Memory.combatState) !== null && _f !== void 0 ? _f : 'RALLY', warriors: (_g = roles['warrior']) !== null && _g !== void 0 ? _g : 0, rangers: (_h = roles['ranger']) !== null && _h !== void 0 ? _h : 0, healers: (_j = roles['healer']) !== null && _j !== void 0 ? _j : 0, target: (_k = Memory.enemyRoomName) !== null && _k !== void 0 ? _k : null, tactics: (_l = Memory.platoonOrders) !== null && _l !== void 0 ? _l : null },
+        economy: (_e = room.memory.energyStatus) !== null && _e !== void 0 ? _e : null,
+        combat: {
+            state: (_f = room.memory.combatState) !== null && _f !== void 0 ? _f : 'RALLY',
+            warriors: (_g = roles['warrior']) !== null && _g !== void 0 ? _g : 0,
+            rangers: (_h = roles['ranger']) !== null && _h !== void 0 ? _h : 0,
+            healers: (_j = roles['healer']) !== null && _j !== void 0 ? _j : 0,
+            target: (_k = room.memory.enemyRoomName) !== null && _k !== void 0 ? _k : null,
+            tactics: (_l = room.memory.platoonOrders) !== null && _l !== void 0 ? _l : null,
+        },
         intel,
         log_entries: (_o = (_m = Memory.statsLog) === null || _m === void 0 ? void 0 : _m.length) !== null && _o !== void 0 ? _o : 0,
     };
-    console.log(`=== adaptive:stats:${Game.time} ===`);
+    console.log(`=== adaptive:stats:${room.name}:${Game.time} ===`);
     console.log(JSON.stringify(full));
 }
 function buildSnapshot(room) {
-    var _a, _b, _c, _d, _e, _f, _g;
+    var _a, _b, _c, _d, _e, _f, _g, _h, _j, _k, _l;
     const ctrl = room.controller;
     const allCreeps = Object.values(Game.creeps);
     const roles = {};
@@ -2316,9 +3861,10 @@ function buildSnapshot(room) {
     const count = (type) => room.find(FIND_STRUCTURES, { filter: s => s.structureType === type }).length;
     return {
         tick: Game.time,
-        phase: (_b = Memory.phase) !== null && _b !== void 0 ? _b : 'ECONOMY',
+        regime: REGIME,
+        phase: (_b = room.memory.phase) !== null && _b !== void 0 ? _b : 'ECONOMY',
         rcl: (_c = ctrl === null || ctrl === void 0 ? void 0 : ctrl.level) !== null && _c !== void 0 ? _c : 0,
-        energy: { avail: room.energyAvailable, cap: room.energyCapacityAvailable },
+        energy: { avail: room.energyAvailable, cap: room.energyCapacityAvailable, netRate: (_e = (_d = room.memory.energyStatus) === null || _d === void 0 ? void 0 : _d.netRate) !== null && _e !== void 0 ? _e : null, bottleneck: (_g = (_f = room.memory.energyStatus) === null || _f === void 0 ? void 0 : _f.bottleneck) !== null && _g !== void 0 ? _g : null },
         creeps: roles,
         ctrl: ctrl ? { pct: Math.floor(ctrl.progress / Math.max(ctrl.progressTotal, 1) * 100), progress: ctrl.progress, total: ctrl.progressTotal } : null,
         structs: {
@@ -2329,34 +3875,39 @@ function buildSnapshot(room) {
             ramparts: count(STRUCTURE_RAMPART),
         },
         combat: {
-            state: (_d = Memory.combatState) !== null && _d !== void 0 ? _d : 'RALLY',
-            warriors: (_e = roles['warrior']) !== null && _e !== void 0 ? _e : 0,
-            rangers: (_f = roles['ranger']) !== null && _f !== void 0 ? _f : 0,
-            target: (_g = Memory.enemyRoomName) !== null && _g !== void 0 ? _g : null,
+            state: (_h = room.memory.combatState) !== null && _h !== void 0 ? _h : 'RALLY',
+            warriors: (_j = roles['warrior']) !== null && _j !== void 0 ? _j : 0,
+            rangers: (_k = roles['ranger']) !== null && _k !== void 0 ? _k : 0,
+            target: (_l = room.memory.enemyRoomName) !== null && _l !== void 0 ? _l : null,
         },
     };
 }
 
 function loop() {
-    var _a;
+    var _a, _b;
     // Purge dead creep memory
     for (const name in Memory.creeps) {
         if (!Game.creeps[name])
             delete Memory.creeps[name];
     }
-    // Global memory defaults (initialize every tick so they're never undefined)
-    if (!Memory.phase)
-        Memory.phase = 'ECONOMY';
+    // Global memory defaults
     if (!Memory.roomIntel)
         Memory.roomIntel = {};
     if (!Memory.statsLog)
         Memory.statsLog = [];
+    // CPU bucket tiers — skip expensive optional managers when the bucket is low
+    // to protect essential operations (spawn, defense, creep roles).
+    // Sigmoid-style: < 1000 = critical, < 2000 = constrained, >= 2000 = normal.
+    const cpuBucket = Game.cpu.bucket;
+    const cpuConstrained = cpuBucket < 2000;
+    const cpuCritical = cpuBucket < 1000;
     // Per-room managers
     for (const roomName in Game.rooms) {
         const room = Game.rooms[roomName];
         if (!((_a = room.controller) === null || _a === void 0 ? void 0 : _a.my))
             continue;
         trackEnergyFlow(room);
+        manageDefense(room);
         updatePhase(room);
         manageConstruction(room);
         manageSpawns(room);
@@ -2364,16 +3915,24 @@ function loop() {
         manageCombat(room);
         manageLinkTransfers(room);
         manageExpansion(room);
-        manageMarket(room);
+        if (!cpuConstrained)
+            manageMarket(room);
+        if (!cpuCritical)
+            manageTransfers(room);
+        if (!cpuCritical)
+            manageRemote(room);
         reportStats(room);
     }
     // Run creep roles
-    const enemyRoom = Memory.enemyRoomName;
     for (const name in Game.creeps) {
         const creep = Game.creeps[name];
-        if ((creep.memory.role === 'warrior' || creep.memory.role === 'ranger' || creep.memory.role === 'healer') &&
-            enemyRoom && !creep.memory.targetRoomName) {
-            creep.memory.targetRoomName = enemyRoom;
+        // For combat roles: seed targetRoomName from their home room's campaign target
+        if (creep.memory.role === 'warrior' || creep.memory.role === 'ranger' || creep.memory.role === 'healer') {
+            const homeRoomName = creep.memory.homeRoom;
+            const enemyRoom = homeRoomName ? (_b = Game.rooms[homeRoomName]) === null || _b === void 0 ? void 0 : _b.memory.enemyRoomName : undefined;
+            if (enemyRoom && !creep.memory.targetRoomName) {
+                creep.memory.targetRoomName = enemyRoom;
+            }
         }
         switch (creep.memory.role) {
             case 'harvester':
@@ -2396,6 +3955,15 @@ function loop() {
                 break;
             case 'claimer':
                 runClaimer(creep);
+                break;
+            case 'reserver':
+                runReserver(creep);
+                break;
+            case 'scavenger':
+                runScavenger(creep);
+                break;
+            case 'courier':
+                runCourier(creep);
                 break;
             case 'warrior':
                 runWarrior(creep);
