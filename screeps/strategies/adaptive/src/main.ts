@@ -34,6 +34,13 @@ export function loop(): void {
     if (!Memory.roomIntel) Memory.roomIntel = {};
     if (!Memory.statsLog)  Memory.statsLog  = [];
 
+    // CPU bucket tiers — skip expensive optional managers when the bucket is low
+    // to protect essential operations (spawn, defense, creep roles).
+    // Sigmoid-style: < 1000 = critical, < 2000 = constrained, >= 2000 = normal.
+    const cpuBucket = Game.cpu.bucket;
+    const cpuConstrained = cpuBucket < 2000;
+    const cpuCritical    = cpuBucket < 1000;
+
     // Per-room managers
     for (const roomName in Game.rooms) {
         const room = Game.rooms[roomName];
@@ -48,9 +55,9 @@ export function loop(): void {
         manageCombat(room);
         manageLinkTransfers(room);
         manageExpansion(room);
-        manageMarket(room);
-        manageTransfers(room);
-        manageRemote(room);
+        if (!cpuConstrained) manageMarket(room);
+        if (!cpuCritical)    manageTransfers(room);
+        if (!cpuCritical)    manageRemote(room);
         reportStats(room);
     }
 

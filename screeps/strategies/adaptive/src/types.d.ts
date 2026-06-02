@@ -77,6 +77,9 @@ declare global {
         enemyStrength?: number;         // strength score of that target
         platoonOrders?: Record<string, import('../types').PlatoonOrder>;
         coordinatedAttackTick?: number;
+        // Decay-first rampart repair cache (getFortifyTarget in combatManager)
+        fortifyTarget?: string;         // cached ID of highest-priority rampart to repair
+        fortifyTargetTick?: number;     // tick when fortifyTarget was last computed
         // Inter-room energy balance
         energySurplus?: number;         // computed by transferManager: excess e/tick this room can donate
         // Remote mining — per-remote-room spawn targets written by remoteManager
@@ -87,6 +90,13 @@ declare global {
             reservedUntil: number;      // tick when reservation expires (used to decide reserver respawn)
         }>;
         sourceDistances?: Record<string, number>; // sourceId → path distance to storage (cached)
+        // PID controller state — drives upgrader count based on total room energy vs setpoint
+        pidState?: {
+            integral:  number;  // accumulated error × dt
+            lastError: number;  // normalized error from previous tick
+            lastTick:  number;  // game tick of previous PID call
+            output:    number;  // last computed upgrader demand (0–4)
+        };
     }
 
     interface Memory {
@@ -107,9 +117,10 @@ declare global {
 
     interface StatSnapshot {
         tick:    number;
+        regime:  string;
         phase:   string;
         rcl:     number;
-        energy:  { avail: number; cap: number };
+        energy:  { avail: number; cap: number; netRate: number | null; bottleneck?: string | null };
         creeps:  Record<string, number>;
         ctrl:    { pct: number; progress: number; total: number } | null;
         structs: { roads: number; containers: number; extensions: number; towers: number; ramparts: number };

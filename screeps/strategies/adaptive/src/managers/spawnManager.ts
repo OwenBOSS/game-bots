@@ -6,6 +6,9 @@ import { calcDynamicTargets, EnergyLevel } from './economyManager';
 const MIN_COMBAT_ENERGY     = 400;
 const WARRIORS_PER_PLATOON  = 3;
 const DOWNGRADE_EMERGENCY_THRESHOLD = 4000;
+// Below this threshold, non-essential roles (upgrader, scout, builder) are skipped.
+// Keeps spawn energy available for harvesters and haulers that maintain the economy.
+const SPAWN_FLOOR = 200;
 
 // Combat targets per phase — these OVERLAY the dynamic economy targets
 const COMBAT_TARGETS: Record<GamePhase, { warrior: number; ranger: number; healer: number; repairer: number }> = {
@@ -20,9 +23,13 @@ export function manageSpawns(room: Room): void {
     if (spawns.length === 0) return;
 
     const spawn   = spawns[0];
-    const phase   = room.memory.phase ?? 'ECONOMY';
+    const phase   = (room.memory.phase ?? 'ECONOMY') as GamePhase;
     const creeps  = room.find(FIND_MY_CREEPS);
-    const counts  = countByRole(creeps);
+    // Count all creeps homed to this room, including those scouting/mining/fighting in
+    // other rooms — room.find only returns creeps physically present, so roaming creeps
+    // (scouts, remote miners, defenders) would appear missing and trigger duplicate spawns.
+    const allHomeCreeps = Object.values(Game.creeps).filter(c => c.memory.homeRoom === room.name);
+    const counts  = countByRole(allHomeCreeps);
     const status  = room.memory.energyStatus ?? { netRate: 0, trend: 0, pct: 50, level: 'STABLE' as EnergyLevel, bottleneck: 'BALANCED' as const };
 
     // Dynamic economy targets based on actual room state
@@ -72,19 +79,37 @@ export function manageSpawns(room: Room): void {
     // ── Economy roles — respect energy level ─────────────────────────────────
     const canSpawnEconomy = status.level !== 'CRITICAL';
 
-    const ecoRoles: { role: CreepRole; target: number; extra?: Partial<CreepMemory> }[] = [
+    // Roles marked minLevel:'STABLE' are skipped during DEFICIT to prevent the
+    // spawn-then-prune death spiral (spawn 200e upgrader → CRITICAL → prune → repeat).
+    // Roles marked needsFloor:true are skipped when energyAvailable < SPAWN_FLOOR (200e)
+    // so energy sinks never drain the pool needed for essential harvester replacements.
+    const LEVEL_ORDER: EnergyLevel[] = ['CRITICAL', 'DEFICIT', 'STABLE', 'SURPLUS'];
+    const ecoRoles: { role: CreepRole; target: number; extra?: Partial<CreepMemory>; minLevel?: EnergyLevel; needsFloor?: boolean }[] = [
         { role: 'harvester', target: eco.harvester },
-        { role: 'builder',   target: eco.builder   },
+        { role: 'builder',   target: eco.builder,   needsFloor: true },
         { role: 'hauler',    target: eco.hauler     },
-        { role: 'upgrader',  target: eco.upgrader   },
-        { role: 'scout',     target: eco.scout      },
+        { role: 'upgrader',  target: eco.upgrader,  minLevel: 'STABLE', needsFloor: true },
+        { role: 'scout',     target: eco.scout,     minLevel: 'STABLE', needsFloor: true },
         { role: 'scavenger', target: eco.scavenger  },
     ];
 
+    // Proportional hauler budget (Quorum: src/programs/city/mine.js).
+    // Size hauler carry capacity to the actual source→storage travel distance rather
+    // than always spending max available energy. Prevents over-built haulers in
+    // high-RCL rooms and under-built haulers in large rooms.
+    // Formula: carryNeeded = distance × 1.3 × 20 (energy generated per round trip)
+    // Our 2C+1M unit carries 100e and costs 150e, so budget = ceil(carryNeeded/100) × 150.
+    // Capped at room.energyAvailable so we never wait — we build the largest affordable
+    // hauler up to the distance-optimal size.
+    const haulerBudget = computeLocalHaulerBudget(room);
+
     if (canSpawnEconomy) {
-        for (const { role, target, extra } of ecoRoles) {
+        for (const { role, target, extra, minLevel, needsFloor } of ecoRoles) {
+            if (minLevel && LEVEL_ORDER.indexOf(status.level) < LEVEL_ORDER.indexOf(minLevel)) continue;
+            if (needsFloor && room.energyAvailable < SPAWN_FLOOR) continue;
             if ((counts[role] ?? 0) < target) {
-                trySpawn(spawn, role, room.energyAvailable, extra);
+                const budget = role === 'hauler' ? haulerBudget : room.energyAvailable;
+                trySpawn(spawn, role, budget, extra);
                 return;
             }
         }
@@ -93,10 +118,18 @@ export function manageSpawns(room: Room): void {
     // ── Remote mining: reservers + remote miners + remote haulers ─────────────
     if (canSpawnEconomy) {
         for (const [remoteName, rt] of Object.entries(room.memory.remoteRooms ?? {})) {
-            // Reserver: keep the room reserved
-            const needsReserver = rt.reservedUntil < Game.time + 500;
-            const hasReserver = creeps.some(c =>
-                c.memory.role === 'reserver' && c.memory.targetRoomName === remoteName
+            // Skip rooms where hostile creeps were spotted recently — sending
+            // miners/haulers there wastes spawn energy until it clears.
+            const remoteIntel = Memory.roomIntel?.[remoteName];
+            const threatened = remoteIntel && remoteIntel.enemyCreeps > 0 &&
+                Game.time - remoteIntel.scannedAt < 300;
+            if (threatened) continue;
+            // Reserver: keep the room reserved (requires 650e — skip at RCL 2)
+            const canAffordReserver = room.energyCapacityAvailable >= 650;
+            const needsReserver = canAffordReserver && rt.reservedUntil < Game.time + 500;
+            const hasReserver = allHomeCreeps.some(c =>
+                c.memory.role === 'reserver' && c.memory.targetRoomName === remoteName &&
+                (c.ticksToLive ?? 1500) >= PRE_SPAWN_TICKS
             );
             if (needsReserver && !hasReserver) {
                 trySpawn(spawn, 'reserver', room.energyAvailable, { targetRoomName: remoteName });
@@ -104,8 +137,9 @@ export function manageSpawns(room: Room): void {
             }
 
             // Remote miners (harvesters assigned to remoteRoom)
-            const currentMiners = creeps.filter(c =>
-                c.memory.role === 'harvester' && c.memory.remoteRoom === remoteName
+            const currentMiners = allHomeCreeps.filter(c =>
+                c.memory.role === 'harvester' && c.memory.remoteRoom === remoteName &&
+                (c.ticksToLive ?? 1500) >= PRE_SPAWN_TICKS
             ).length;
             if (currentMiners < rt.miners) {
                 trySpawn(spawn, 'harvester', room.energyAvailable, { remoteRoom: remoteName });
@@ -113,8 +147,9 @@ export function manageSpawns(room: Room): void {
             }
 
             // Remote haulers
-            const currentHaulers = creeps.filter(c =>
-                c.memory.role === 'hauler' && c.memory.remoteRoom === remoteName
+            const currentHaulers = allHomeCreeps.filter(c =>
+                c.memory.role === 'hauler' && c.memory.remoteRoom === remoteName &&
+                (c.ticksToLive ?? 1500) >= PRE_SPAWN_TICKS
             ).length;
             if (currentHaulers < rt.haulers) {
                 trySpawn(spawn, 'hauler', room.energyAvailable, { remoteRoom: remoteName });
@@ -127,8 +162,9 @@ export function manageSpawns(room: Room): void {
     if (canSpawnEconomy && (room.memory.energySurplus ?? 0) > 0) {
         const deficitRoom = findDeficitNeighbor(room);
         if (deficitRoom) {
-            const existingCouriers = creeps.filter(c =>
-                c.memory.role === 'courier' && c.memory.courierTarget === deficitRoom
+            const existingCouriers = allHomeCreeps.filter(c =>
+                c.memory.role === 'courier' && c.memory.courierTarget === deficitRoom &&
+                (c.ticksToLive ?? 1500) >= PRE_SPAWN_TICKS
             ).length;
             if (existingCouriers < 2) {
                 trySpawn(spawn, 'courier', room.energyAvailable, { courierTarget: deficitRoom });
@@ -175,7 +211,10 @@ export function pruneExcessCreeps(room: Room): void {
     const status   = room.memory.energyStatus;
 
     // Suicide combat units after sustained ECONOMY (they're RUSH leftovers)
-    if (phase === 'ECONOMY' && phaseAge > 500) {
+    const energyLevel = status?.level ?? 'STABLE';
+    const urgentCull  = phase === 'ECONOMY' && energyLevel !== 'SURPLUS';
+    const timedCull   = phase === 'ECONOMY' && phaseAge > 500;
+    if (urgentCull || timedCull) {
         for (const c of creeps) {
             if (c.memory.role === 'warrior' || c.memory.role === 'ranger' || c.memory.role === 'healer') {
                 console.log(`[adaptive] Retiring ${c.memory.role} (ECONOMY for ${phaseAge} ticks)`);
@@ -285,8 +324,9 @@ function trySpawn(
 
 // Creeps with fewer than PRE_SPAWN_TICKS remaining are excluded from the count.
 // This triggers a replacement spawn BEFORE the old creep dies, so coverage
-// is continuous with no gap. Threshold covers max spawn time + safety buffer.
-const PRE_SPAWN_TICKS = 60; // body × 3 ticks per part + ~20 tick buffer
+// is continuous with no gap. Largest bodies (hauler/upgrader ~33 parts) take
+// ~100 ticks to spawn, so 100 covers the worst case with a small buffer.
+const PRE_SPAWN_TICKS = 100;
 
 function countByRole(creeps: Creep[]): Record<CreepRole, number> {
     const c: Record<string, number> = {};
@@ -296,4 +336,30 @@ function countByRole(creeps: Creep[]): Record<CreepRole, number> {
         c[creep.memory.role] = (c[creep.memory.role] ?? 0) + 1;
     }
     return c as Record<CreepRole, number>;
+}
+
+// Compute ideal hauler energy budget from average source→storage path distance.
+// Ported from screeps-quorum/mine.js `mineSource` hauler section.
+// Each 2C+1M unit (150e) carries 100e; we need enough carry for one full round trip.
+// Capped at room.energyAvailable so we never block the spawn queue waiting for energy.
+export function computeLocalHaulerBudget(room: Room): number {
+    const distances = room.memory.sourceDistances;
+    if (!distances) return room.energyAvailable;
+
+    const sources = room.find(FIND_SOURCES);
+    if (sources.length === 0) return room.energyAvailable;
+
+    let total = 0, count = 0;
+    for (const src of sources) {
+        const d = distances[src.id as string];
+        if (d) { total += d; count++; }
+    }
+    if (count === 0) return room.energyAvailable;
+
+    const avgDist     = total / count;
+    const multiplier  = 1.3;
+    const carryNeeded = avgDist * multiplier * 20; // energy capacity needed per trip
+    const units       = Math.max(1, Math.ceil(carryNeeded / 100)); // 100e carry per unit
+    const ideal       = Math.min(units * 150, room.energyCapacityAvailable);
+    return Math.min(ideal, room.energyAvailable);
 }

@@ -1,0 +1,7 @@
+dashboard/index.html
+dashboard/data/
+.env
+dashboard/report.md
+dashboard/prompt.md
+strategies/*/node_modules/
+strategies/*/dist/

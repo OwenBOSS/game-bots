@@ -1,3 +1,5 @@
+import { period } from '../utils/period';
+
 const MAX_ROAD_SITES = 10;
 
 export function manageConstruction(room: Room): void {
@@ -9,7 +11,7 @@ export function manageConstruction(room: Room): void {
         return;
     }
 
-    if (Game.time % 5 === 0) pruneExcessRoadSites(room);
+    if (period(5, 'construction:prune')) pruneExcessRoadSites(room);
     maintainRoadQueue(room);
 
     if (Memory.roadsPlanned && Memory.lastRCL === rcl) return;

@@ -3,6 +3,8 @@
 // Ghodium (1000G) is consumed by a creep using generateSafeMode(controller) to
 // add one safe mode charge. The upgrader handles the generation step.
 
+import { period } from '../utils/period';
+
 const GHODIUM_TARGET   = 1000; // enough for one safe mode recharge
 const CHECK_INTERVAL   = 200;  // only scan market every 200 ticks (rate limit + CPU)
 const MIN_CREDITS      = 500;  // don't buy if broke
@@ -10,7 +12,7 @@ const MIN_CREDITS      = 500;  // don't buy if broke
 export function manageMarket(room: Room): void {
     if (!room.terminal) return;
     if (room.terminal.cooldown > 0) return;
-    if (Game.time % CHECK_INTERVAL !== 0) return;
+    if (!period(CHECK_INTERVAL, 'market:check')) return;
 
     const ctrl = room.controller;
     if (!ctrl) return;

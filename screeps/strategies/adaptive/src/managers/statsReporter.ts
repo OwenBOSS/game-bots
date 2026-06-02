@@ -1,3 +1,6 @@
+import { REGIME } from '../regime';
+import { period } from '../utils/period';
+
 const REPORT_INTERVAL = 50;
 const LOG_INTERVAL    = 200;
 const LOG_MAX_ENTRIES = 500;
@@ -5,7 +8,7 @@ const LOG_MAX_ENTRIES = 500;
 export function reportStats(room: Room): void {
     const snap = buildSnapshot(room);
 
-    if (Game.time % LOG_INTERVAL === 0) {
+    if (period(LOG_INTERVAL, 'stats:log')) {
         if (!Memory.statsLog) Memory.statsLog = [];
         Memory.statsLog.push(snap);
         if (Memory.statsLog.length > LOG_MAX_ENTRIES) {
@@ -13,7 +16,7 @@ export function reportStats(room: Room): void {
         }
     }
 
-    if (Game.time % REPORT_INTERVAL !== 0) return;
+    if (!period(REPORT_INTERVAL, 'stats:report')) return;
 
     const ctrl = room.controller;
     const allCreeps = Object.values(Game.creeps);
@@ -81,9 +84,10 @@ function buildSnapshot(room: Room): StatSnapshot {
 
     return {
         tick:    Game.time,
+        regime:  REGIME,
         phase:   room.memory.phase ?? 'ECONOMY',
         rcl:     ctrl?.level ?? 0,
-        energy:  { avail: room.energyAvailable, cap: room.energyCapacityAvailable },
+        energy:  { avail: room.energyAvailable, cap: room.energyCapacityAvailable, netRate: room.memory.energyStatus?.netRate ?? null, bottleneck: room.memory.energyStatus?.bottleneck ?? null },
         creeps:  roles,
         ctrl:    ctrl ? { pct: Math.floor(ctrl.progress / Math.max(ctrl.progressTotal, 1) * 100), progress: ctrl.progress, total: ctrl.progressTotal } : null,
         structs: {

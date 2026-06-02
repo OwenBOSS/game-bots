@@ -214,9 +214,8 @@ function getCachedContainer(creep: Creep, inRoom: string): StructureContainer | 
 }
 
 function moveToRoom(creep: Creep, roomName: string): void {
-    const exitDir = creep.room.findExitTo(roomName);
-    if (exitDir !== ERR_NO_PATH && exitDir !== ERR_INVALID_ARGS) {
-        const exit = creep.pos.findClosestByRange(exitDir);
-        if (exit) creep.moveTo(exit, { reusePath: 3 });
-    }
+    // Move toward room center — native pathfinder handles cross-room routing.
+    // reusePath:20 caches the serialized path across ticks; range:23 stops as
+    // soon as we're inside the room (within 23 tiles of center on a 50×50 grid).
+    creep.moveTo(new RoomPosition(25, 25, roomName), { reusePath: 20, range: 23 });
 }

@@ -1,0 +1,50 @@
+# Screeps bot build & deploy
+# Usage: just deploy            — build & deploy the active strategy (adaptive)
+#        just deploy season10   — build & deploy a specific strategy
+#        just build             — build only, no copy
+
+set shell := ["powershell.exe", "-c"]
+set dotenv-load
+
+strategy := "adaptive"
+
+# WinGet install shadows the Desktop app on PATH — use the full path to Claude Code CLI
+claude_code := "C:\\Users\\owenb\\AppData\\Local\\Microsoft\\WinGet\\Packages\\Anthropic.ClaudeCode_Microsoft.Winget.Source_8wekyb3d8bbwe\\claude"
+
+default:
+    @just --list
+
+# Build and deploy a strategy. Tags the deploy as a new regime so dashboard
+# can separate performance data before vs. after this code change.
+# Usage: just deploy           (deploys adaptive)
+#        just deploy season10  (deploys season10)
+#        just deploy adaptive "added hauler boost"  (deploy with description)
+deploy strat=strategy desc="":
+    node dashboard/set-regime.mjs {{strat}} {{desc}}
+    cd strategies/{{strat}}; npm run deploy
+
+# Build only (no deploy, no regime tag)
+build strat=strategy:
+    cd strategies/{{strat}}; npm run build
+
+# Watch for changes and rebuild
+watch strat=strategy:
+    cd strategies/{{strat}}; npm run watch
+
+# Deploy all active strategies
+deploy-all:
+    node dashboard/set-regime.mjs adaptive
+    cd strategies/adaptive; npm run deploy
+    node dashboard/set-regime.mjs season10
+    cd strategies/season10; npm run deploy
+
+# Fetch latest stats from Screeps API and regenerate the dashboard HTML.
+# Requires $env:SCREEPS_TOKEN or a .env file with SCREEPS_TOKEN=<token>
+# Get your token at: https://screeps.com/a/#!/account/auth-tokens
+fetch-stats:
+    node dashboard/fetch-stats.mjs
+
+# Fetch latest stats, analyze performance by regime, and write
+# screeps/dashboard/suggested-changes.md with targeted fix recommendations.
+analyze:
+    node dashboard/analyze.mjs

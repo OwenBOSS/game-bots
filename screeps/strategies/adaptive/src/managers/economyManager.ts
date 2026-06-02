@@ -15,9 +15,13 @@
 //   HAULER_SHORTAGE     → containers filling up but spawn energy low; add haulers
 //   BALANCED            → no constraint; use baseline targets
 
+import { period } from '../utils/period';
+import { computePID, DEFAULT_PID_CONFIG } from '../utils/pidController';
+
 const SAMPLE_INTERVAL = 5;   // sample every N ticks
 const WINDOW_SIZE     = 20;  // samples kept (= WINDOW_SIZE × SAMPLE_INTERVAL ticks)
 const MAX_HARVESTERS_PER_SOURCE = 4;
+const MAX_HAULERS_PER_SOURCE    = 3;  // hard cap: sources * MAX + 2
 
 export type EnergyLevel = 'SURPLUS' | 'STABLE' | 'DEFICIT' | 'CRITICAL';
 export type Bottleneck  = 'HARVESTER_SHORTAGE' | 'HAULER_SHORTAGE' | 'SOURCE_MAXED' | 'BALANCED';
@@ -30,10 +34,29 @@ export interface EnergyStatus {
     bottleneck: Bottleneck;
 }
 
+// ─── Total energy (PV for PID) ────────────────────────────────────────────────
+
+export function computeTotalEnergy(room: Room): { current: number; capacity: number } {
+    const containers = room.find(FIND_STRUCTURES, {
+        filter: s => s.structureType === STRUCTURE_CONTAINER,
+    }) as StructureContainer[];
+
+    const containerCurrent  = containers.reduce((s, c) => s + c.store[RESOURCE_ENERGY], 0);
+    const containerCapacity = containers.reduce((s, c) => s + (c.store.getCapacity(RESOURCE_ENERGY) ?? 0), 0);
+
+    const storageCurrent  = room.storage?.store[RESOURCE_ENERGY] ?? 0;
+    const storageCapacity = room.storage?.store.getCapacity(RESOURCE_ENERGY) ?? 0;
+
+    return {
+        current:  room.energyAvailable  + containerCurrent  + storageCurrent,
+        capacity: room.energyCapacityAvailable + containerCapacity + storageCapacity,
+    };
+}
+
 // ─── Sampling ─────────────────────────────────────────────────────────────────
 
 export function trackEnergyFlow(room: Room): void {
-    if (Game.time % SAMPLE_INTERVAL !== 0) return;
+    if (!period(SAMPLE_INTERVAL, `economy:sample:${room.name}`)) return;
 
     if (!room.memory.energyHistory) room.memory.energyHistory = [];
     room.memory.energyHistory.push({
@@ -49,6 +72,12 @@ export function trackEnergyFlow(room: Room): void {
     const status = computeStatus(room);
     status.bottleneck = detectBottleneck(status, room);
     room.memory.energyStatus = status;
+
+    // ── PID: drive sink demand (upgrader count) toward setpoint ───────────────
+    const { current, capacity } = computeTotalEnergy(room);
+    const prevPID = room.memory.pidState ?? { integral: 0, lastError: 0, lastTick: Game.time - SAMPLE_INTERVAL };
+    const { output, nextState } = computePID(current, capacity, prevPID, DEFAULT_PID_CONFIG, Game.time);
+    room.memory.pidState = { ...nextState, output };
 }
 
 function sampleContainerFillPct(room: Room): number {
@@ -121,8 +150,13 @@ function detectBottleneck(status: EnergyStatus, room: Room): Bottleneck {
         return 'HARVESTER_SHORTAGE';
     }
 
-    // Containers backing up but spawn energy low → haulers can't drain fast enough
-    if (avgCont > 70 && status.pct < 50) return 'HAULER_SHORTAGE';
+    // Containers chronically backed up, spawn energy declining → haulers can't drain fast enough.
+    // Require DEFICIT level AND negative rate to avoid false positives on transient post-spawn dips.
+    if (avgCont > 60 && status.pct < 50 &&
+        (status.level === 'DEFICIT' || status.level === 'CRITICAL') &&
+        status.netRate < -0.3) {
+        return 'HAULER_SHORTAGE';
+    }
 
     return 'BALANCED';
 }
@@ -184,9 +218,11 @@ export function calcDynamicTargets(room: Room): DynamicTargets {
     }
     if (hasControllerContainer) baseHaulers += 1;
 
-    const hauler = bottleneck === 'HAULER_SHORTAGE'
+    const haulerRaw = bottleneck === 'HAULER_SHORTAGE'
         ? baseHaulers + sourceCntrs
         : baseHaulers;
+    // Hard cap: prevent over-spawning haulers that starve harvester replacements
+    const hauler = Math.min(haulerRaw, sources.length * MAX_HAULERS_PER_SOURCE + 2);
 
     // ── Builders ──────────────────────────────────────────────────────────────
     // Gate builder count on container fill: spawning idle builders wastes capacity.
@@ -205,7 +241,13 @@ export function calcDynamicTargets(room: Room): DynamicTargets {
     }
 
     // ── Upgrader ──────────────────────────────────────────────────────────────
-    const upgrader = hasControllerContainer ? 1 : 0;
+    // PID output drives upgrader count: high energy → more upgraders (more sinks),
+    // low energy → fewer upgraders (preserve energy for spawning).
+    // Without a controller container, upgraders can't sit and drain steadily → 0.
+    const pidOutput = room.memory.pidState?.output ?? DEFAULT_PID_CONFIG.outputMid;
+    const upgrader  = hasControllerContainer
+        ? Math.max(0, Math.min(4, Math.round(pidOutput)))
+        : 0;
 
     const repairer  = 0; // phase override in spawnManager handles DEFEND
     const scout     = rcl >= 1 ? 1 : 0;
@@ -242,9 +284,12 @@ function getSourceDistance(room: Room, source: Source, storage: StructureStorage
         return cached;
     }
 
-    // Recalculate via PathFinder
-    const dest = storage?.pos ?? room.controller?.pos;
-    let dist   = 15; // conservative default when no storage yet
+    // Recalculate via PathFinder.
+    // Prefer storage → spawn → controller as destination in that priority order.
+    // Haulers deliver to spawn/extensions, not the controller; using controller
+    // over-estimates distance and inflates hauler targets.
+    const dest = storage?.pos ?? room.find(FIND_MY_SPAWNS)[0]?.pos ?? room.controller?.pos;
+    let dist   = 10; // fallback when no dest or path incomplete
 
     if (dest) {
         const result = PathFinder.search(source.pos, { pos: dest, range: 1 }, { plainCost: 1, swampCost: 2, maxOps: 2000 });

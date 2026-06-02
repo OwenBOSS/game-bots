@@ -2,13 +2,42 @@ import { CombatState } from '../types';
 import { manageTactics } from './tacticsManager';
 import { manageQuads } from './quadManager';
 
-const MIN_FIGHTERS_TO_MARCH = 3;   // was 4 — march sooner, keep pressure
+const MIN_FIGHTERS_TO_MARCH = 3;
 const MIN_HEALERS_TO_MARCH  = 1;
 const RAID_STRENGTH_MAX     = 15;  // raid without healer if enemy this weak
 const REASSESS_INTERVAL     = 500;
 
 const SAFE_MODE_RAMPART_THRESHOLD = 5_000;
 const SAFE_MODE_OVERWHELM_COUNT   = 5;
+
+// Decay limit from screeps-quorum/fortify.js: ramparts below this are treated as
+// emergencies and repaired before any other structure.
+const RAMPART_DECAY_LIMIT   = 30_000;
+const FORTIFY_CACHE_TICKS   = 50;
+
+// ─── Tower falloff tables (Quorum: src/programs/city/defense.js) ─────────────
+// Pre-computed once per global reset; indexed by tile distance (0–49).
+// Avoids repeated floating-point math in the hot tower-targeting path.
+const TOWER_DMG_AT: number[] = [];
+const TOWER_HEAL_AT: number[] = [];
+
+function initTowerTables(): void {
+    if (TOWER_DMG_AT.length > 0) return;
+    for (let d = 0; d < 50; d++) {
+        TOWER_DMG_AT[d]  = towerEffect(TOWER_POWER_ATTACK, d);
+        TOWER_HEAL_AT[d] = towerEffect(TOWER_POWER_HEAL,   d);
+    }
+}
+
+export function towerEffect(power: number, distance: number): number {
+    if (distance <= TOWER_OPTIMAL_RANGE) return power;
+    const d = Math.min(distance, TOWER_FALLOFF_RANGE);
+    return Math.floor(
+        power - power * TOWER_FALLOFF * (d - TOWER_OPTIMAL_RANGE) / (TOWER_FALLOFF_RANGE - TOWER_OPTIMAL_RANGE)
+    );
+}
+
+// ─── Public entry ─────────────────────────────────────────────────────────────
 
 export function manageCombat(room: Room): void {
     checkSafeMode(room);
@@ -32,15 +61,28 @@ function checkSafeMode(room: Room): void {
     const ramparts = room.find(FIND_MY_STRUCTURES, {
         filter: s => s.structureType === STRUCTURE_RAMPART,
     }) as StructureRampart[];
-
     const criticalRampart = ramparts.length > 0 &&
         Math.min(...ramparts.map(r => r.hits)) < SAFE_MODE_RAMPART_THRESHOLD;
     const overwhelmed = dangerousHostiles.length >= SAFE_MODE_OVERWHELM_COUNT;
 
-    if (criticalRampart || overwhelmed) {
-        ctrl.activateSafeMode();
-        console.log(`[${room.name}] ⚠️ SAFE MODE ACTIVATED (hostiles=${dangerousHostiles.length} criticalRampart=${criticalRampart})`);
+    if (!criticalRampart && !overwhelmed) return;
+
+    // Quorum safemode priority guard: if a higher-RCL owned room still has charges,
+    // withhold ours — ghodium is scarce and more valuable rooms need protection first.
+    const myRcl = ctrl.level ?? 0;
+    const betterRoomHasCharges = Object.values(Game.rooms).some(r =>
+        r.name !== room.name &&
+        r.controller?.my &&
+        (r.controller?.level ?? 0) > myRcl &&
+        (r.controller?.safeModeAvailable ?? 0) > 0
+    );
+    if (betterRoomHasCharges) {
+        console.log(`[${room.name}] Safemode withheld — higher-RCL room has charges`);
+        return;
     }
+
+    ctrl.activateSafeMode();
+    console.log(`[${room.name}] SAFE MODE ACTIVATED (hostiles=${dangerousHostiles.length} criticalRampart=${criticalRampart})`);
 }
 
 // ─── Tower management ────────────────────────────────────────────────────────
@@ -49,39 +91,99 @@ function manageTowers(room: Room): void {
     const towers = room.find(FIND_MY_STRUCTURES, {
         filter: s => s.structureType === STRUCTURE_TOWER,
     }) as StructureTower[];
+    if (towers.length === 0) return;
 
-    for (const tower of towers) {
-        if (tower.store[RESOURCE_ENERGY] < 10) continue;
+    initTowerTables();
 
-        const hostiles = room.find(FIND_HOSTILE_CREEPS);
-        if (hostiles.length > 0) {
-            const target = hostiles.reduce((a, b) => threatScore(b) > threatScore(a) ? b : a);
+    const hostiles = room.find(FIND_HOSTILE_CREEPS);
+    if (hostiles.length > 0) {
+        // Falloff-aware targeting: pick healer priority, then the target our
+        // towers collectively deal the most damage to at their actual distances.
+        const target = chooseTowerTarget(towers, hostiles);
+        for (const tower of towers) {
+            if (tower.store[RESOURCE_ENERGY] < TOWER_ENERGY_COST) continue;
             tower.attack(target);
-            continue;
         }
+        return;
+    }
 
-        const damaged = room.find(FIND_MY_STRUCTURES, {
-            filter: s => s.hits < s.hitsMax * 0.9,
-        });
-        if (damaged.length > 0) {
-            const worst = damaged.reduce((a, b) => a.hits < b.hits ? a : b);
-            tower.repair(worst);
+    // No hostiles: heal the most-damaged friendly creep.
+    // Quorum pattern: accumulate heal from successive towers and break early
+    // once remaining damage is covered — prevents wasting energy on a creep
+    // that's already fully covered by earlier towers in the list.
+    const myCreeps = room.find(FIND_MY_CREEPS);
+    const damaged = myCreeps.filter(c => c.hits < c.hitsMax);
+    if (damaged.length > 0) {
+        const target = damaged.reduce((a, b) => (a.hitsMax - a.hits) > (b.hitsMax - b.hits) ? a : b);
+        let remaining = target.hitsMax - target.hits;
+        for (const tower of towers) {
+            if (remaining <= 0) break;
+            if (tower.store[RESOURCE_ENERGY] < TOWER_ENERGY_COST) continue;
+            const d = Math.min(tower.pos.getRangeTo(target), 49);
+            remaining -= TOWER_HEAL_AT[d];
+            tower.heal(target);
+        }
+        return;
+    }
+
+    // No hostiles, no damaged creeps: repair the highest-priority rampart.
+    const fortifyTarget = getFortifyTarget(room);
+    if (fortifyTarget) {
+        for (const tower of towers) {
+            if (tower.store[RESOURCE_ENERGY] < TOWER_ENERGY_COST) continue;
+            tower.repair(fortifyTarget);
         }
     }
 }
 
-function threatScore(creep: Creep): number {
-    return creep.body.reduce((n, p) => {
-        if (p.type === ATTACK)         return n + 3;
-        if (p.type === RANGED_ATTACK)  return n + 2;
-        if (p.type === WORK)           return n + 1;
-        return n;
-    }, 0);
+// Healer priority — killing regeneration multiplies effective tower DPS.
+// Within each pool, pick the target our towers collectively deal most damage to
+// (falloff-weighted sum across all towers at their actual distances).
+export function chooseTowerTarget(towers: StructureTower[], hostiles: Creep[]): Creep {
+    const healers = hostiles.filter(c => c.body.some(p => p.type === HEAL && p.hits > 0));
+    const pool = healers.length > 0 ? healers : hostiles;
+
+    let best = pool[0];
+    let bestDmg = -1;
+    for (const hostile of pool) {
+        let totalDmg = 0;
+        for (const tower of towers) {
+            const d = Math.min(tower.pos.getRangeTo(hostile), 49);
+            totalDmg += TOWER_DMG_AT[d];
+        }
+        if (totalDmg > bestDmg) { bestDmg = totalDmg; best = hostile; }
+    }
+    return best;
+}
+
+// ─── Decay-first rampart repair (Quorum: src/programs/city/fortify.js) ───────
+// Priority: decaying (< 30k hits) sorted ascending → then lowest hits overall.
+// Result cached for 50 ticks to avoid O(n) find every tick.
+
+export function getFortifyTarget(room: Room): StructureRampart | null {
+    const cached = room.memory.fortifyTarget
+        ? Game.getObjectById<StructureRampart>(room.memory.fortifyTarget)
+        : null;
+    if (cached && Game.time - (room.memory.fortifyTargetTick ?? 0) < FORTIFY_CACHE_TICKS) {
+        return cached;
+    }
+
+    const ramparts = room.find(FIND_MY_STRUCTURES, {
+        filter: s => s.structureType === STRUCTURE_RAMPART,
+    }) as StructureRampart[];
+    if (ramparts.length === 0) return null;
+
+    const decaying = ramparts.filter(r => r.hits <= RAMPART_DECAY_LIMIT);
+    const target = decaying.length > 0
+        ? decaying.reduce((a, b) => a.hits < b.hits ? a : b)
+        : ramparts.reduce((a, b) => a.hits < b.hits ? a : b);
+
+    room.memory.fortifyTarget     = target.id;
+    room.memory.fortifyTargetTick = Game.time;
+    return target;
 }
 
 // ─── Per-room combat state machine ───────────────────────────────────────────
-// Only considers creeps whose homeRoom matches this room, so multiple rooms
-// can run independent RALLY/MARCH/ENGAGE campaigns simultaneously.
 
 function manageCombatState(room: Room): void {
     const allCombat = room.find(FIND_MY_CREEPS, {

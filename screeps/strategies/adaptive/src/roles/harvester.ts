@@ -155,9 +155,5 @@ function findDeliveryTarget(creep: Creep): AnyOwnedStructure | null {
 }
 
 function moveToRoom(creep: Creep, roomName: string): void {
-    const exitDir = creep.room.findExitTo(roomName);
-    if (exitDir !== ERR_NO_PATH && exitDir !== ERR_INVALID_ARGS) {
-        const exit = creep.pos.findClosestByRange(exitDir);
-        if (exit) creep.moveTo(exit, { reusePath: 5 });
-    }
+    creep.moveTo(new RoomPosition(25, 25, roomName), { reusePath: 20, range: 23 });
 }

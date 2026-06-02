@@ -107,7 +107,9 @@ function rangerBody(budget: number): BodyPartConstant[] | null {
 
 function scoutBody(budget: number): BodyPartConstant[] | null {
     if (budget < 50) return null;
-    return r(MOVE, Math.min(Math.floor(budget / 50), 5));
+    // Pure-MOVE creeps have zero body weight → zero fatigue → full speed on all terrain.
+    // Extra MOVE parts add cost with no benefit.
+    return [MOVE];
 }
 
 // CLAIM is 600e. Extra MOVE for faster travel to the target room.

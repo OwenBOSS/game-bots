@@ -8,7 +8,7 @@
 
 const MAX_REMOTE_ROOMS  = 3;  // cap: CPU scales with remote rooms
 const RESERVE_THRESHOLD = 500; // re-send reserver when ticksLeft drops below this
-const MIN_MINER_RCL     = 3;   // don't remote-mine until we have decent economy
+const MIN_MINER_RCL     = 2;   // RCL 2 has containers + haulers — remote mining helps economy
 
 export function manageRemote(room: Room): void {
     if ((room.controller?.level ?? 0) < MIN_MINER_RCL) return;

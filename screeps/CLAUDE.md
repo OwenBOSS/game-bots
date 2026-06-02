@@ -6,6 +6,28 @@ TypeScript bots for Screeps World (shard3) and Season 10 free event. One deploya
 ## Active Strategy
 `strategies/adaptive/` — production bot. Per-room ECONOMY→ASSESS→RUSH/DEFEND phase machine, 12 creep roles, dynamic body scaling, bottleneck-aware economy, multi-room defense coordination, inter-room energy transfer, and per-room independent offense campaigns.
 
+## Test-Driven Development
+
+We use **Vitest** for unit testing. Tests live in `strategies/<name>/src/__tests__/`.
+
+```bash
+cd strategies/adaptive
+npm test            # run all tests once
+npm run test:watch  # watch mode
+npm run test:coverage
+```
+
+**Write tests before or alongside new logic.** Key rules:
+- Every new manager function and utility needs tests in `src/__tests__/`.
+- Mock the Screeps API via `src/__tests__/setup.ts` (globals) and `src/__tests__/helpers.ts` (Room/Source/Container factories).
+- Don't test Screeps engine behavior — test your own logic only.
+- Test files must end in `.test.ts`.
+
+Current test coverage:
+- `bodyBuilder.ts` — all roles, budget scaling, caps, part ordering
+- `economyManager.ts` — bottleneck detection, `calcDynamicTargets`, `trackEnergyFlow`
+- `strategyManager.ts` — full FSM: ECONOMY/ASSESS/RUSH/DEFEND transitions, safe mode override
+
 ## Deploy Workflow
 ```bash
 cd strategies/<name>
