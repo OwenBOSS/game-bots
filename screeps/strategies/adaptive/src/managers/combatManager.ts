@@ -1,8 +1,10 @@
 import { CombatState } from '../types';
 import { manageTactics } from './tacticsManager';
+import { manageQuads } from './quadManager';
 
-const MIN_FIGHTERS_TO_MARCH = 4;
+const MIN_FIGHTERS_TO_MARCH = 3;   // was 4 — march sooner, keep pressure
 const MIN_HEALERS_TO_MARCH  = 1;
+const RAID_STRENGTH_MAX     = 15;  // raid without healer if enemy this weak
 const REASSESS_INTERVAL     = 500;
 
 const SAFE_MODE_RAMPART_THRESHOLD = 5_000;
@@ -13,6 +15,7 @@ export function manageCombat(room: Room): void {
     manageTowers(room);
     manageCombatState(room);
     manageTactics(room);
+    manageQuads(room);
 }
 
 // ─── Safe mode ────────────────────────────────────────────────────────────────
@@ -92,16 +95,18 @@ function manageCombatState(room: Room): void {
     const enemyRoom = room.memory.enemyRoomName;
 
     switch (state) {
-        case 'RALLY':
-            if (fighters.length >= MIN_FIGHTERS_TO_MARCH &&
-                healers.length  >= MIN_HEALERS_TO_MARCH  &&
-                enemyRoom) {
+        case 'RALLY': {
+            const isRaidTarget = (room.memory.enemyStrength ?? 999) <= RAID_STRENGTH_MAX;
+            const healerReady  = healers.length >= MIN_HEALERS_TO_MARCH;
+            if (fighters.length >= MIN_FIGHTERS_TO_MARCH && (healerReady || isRaidTarget) && enemyRoom) {
                 room.memory.combatState = 'MARCH';
                 room.memory.rallyTick   = Game.time;
                 assignTargetRoom(allCombat, enemyRoom);
-                console.log(`[${room.name}] Combat → MARCH (${fighters.length}f + ${healers.length}h → ${enemyRoom})`);
+                const mode = healerReady ? `${healers.length}h` : 'RAID';
+                console.log(`[${room.name}] Combat → MARCH (${fighters.length}f ${mode} → ${enemyRoom})`);
             }
             break;
+        }
 
         case 'MARCH': {
             if (fighters.length === 0) { room.memory.combatState = 'RALLY'; break; }

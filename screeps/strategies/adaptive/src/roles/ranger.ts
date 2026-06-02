@@ -42,13 +42,16 @@ function defendRoom(creep: Creep): void {
 function engage(creep: Creep): void {
     const nearbyEnemies = creep.pos.findInRange(FIND_HOSTILE_CREEPS, KITE_RANGE);
 
-    // Use mass attack when 3+ enemies are clustered (hits all in 3-tile AoE)
     if (nearbyEnemies.length >= 3) {
         creep.rangedMassAttack();
         return;
     }
 
-    const target = findTarget(creep);
+    // Quad-coordinated target takes priority
+    const quadTarget = creep.memory.targetId
+        ? Game.getObjectById(creep.memory.targetId as Id<Creep | AnyOwnedStructure>)
+        : null;
+    const target = (quadTarget as Creep | AnyOwnedStructure | null) ?? findTarget(creep);
     if (!target) {
         creep.moveTo(new RoomPosition(25, 25, creep.room.name), { reusePath: 10 });
         return;

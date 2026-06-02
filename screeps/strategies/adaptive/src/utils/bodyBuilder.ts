@@ -12,6 +12,7 @@ export function buildBody(role: CreepRole, budget: number): BodyPartConstant[] |
         case 'repairer':   return workerBody(budget);
         case 'scavenger':  return scavengerBody(budget);
         case 'courier':    return courierBody(budget);
+        case 'reserver':   return reserverBody(budget);
         case 'warrior':    return warriorBody(budget);
         case 'ranger':     return rangerBody(budget);
         case 'scout':      return scoutBody(budget);
@@ -54,6 +55,14 @@ function workerBody(budget: number): BodyPartConstant[] | null {
     if (budget < 200) return null;
     const units = Math.min(Math.floor(budget / 200), 8);
     return [...r(WORK, units), ...r(CARRY, units), ...r(MOVE, units)];
+}
+
+// Reserver: CLAIM (600e) + extra MOVE for fast travel to adjacent rooms.
+// One CLAIM part adds 600 ticks per reserveController() call (cap 5000t).
+function reserverBody(budget: number): BodyPartConstant[] | null {
+    if (budget < 650) return null;
+    const extraMoves = Math.min(Math.floor((budget - 650) / 50), 4);
+    return [CLAIM, ...r(MOVE, 1 + extraMoves)];
 }
 
 // Scavenger: fast looter — equal CARRY and MOVE for full-road speed plus TOUGH buffer.

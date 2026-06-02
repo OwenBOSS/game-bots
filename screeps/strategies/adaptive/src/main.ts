@@ -5,6 +5,7 @@ import { runBuilder }         from './roles/builder';
 import { runRepairer }        from './roles/repairer';
 import { runScout }           from './roles/scout';
 import { runClaimer }         from './roles/claimer';
+import { runReserver }        from './roles/reserver';
 import { runScavenger }       from './roles/scavenger';
 import { runCourier }         from './roles/courier';
 import { runWarrior }         from './roles/warrior';
@@ -20,6 +21,7 @@ import { manageDefense }     from './managers/defenseManager';
 import { manageLinkTransfers } from './managers/linkManager';
 import { manageMarket }       from './managers/marketManager';
 import { manageTransfers }    from './managers/transferManager';
+import { manageRemote }       from './managers/remoteManager';
 import { reportStats }        from './managers/statsReporter';
 
 export function loop(): void {
@@ -48,6 +50,7 @@ export function loop(): void {
         manageExpansion(room);
         manageMarket(room);
         manageTransfers(room);
+        manageRemote(room);
         reportStats(room);
     }
 
@@ -72,6 +75,7 @@ export function loop(): void {
             case 'repairer':   runRepairer(creep);   break;
             case 'scout':      runScout(creep);      break;
             case 'claimer':    runClaimer(creep);    break;
+            case 'reserver':   runReserver(creep);   break;
             case 'scavenger':  runScavenger(creep);  break;
             case 'courier':    runCourier(creep);    break;
             case 'warrior':    runWarrior(creep);    break;

@@ -11,7 +11,7 @@ export interface PlatoonOrder {
 }
 export type CreepRole =
     | 'harvester' | 'hauler' | 'upgrader' | 'builder' | 'repairer'
-    | 'scout' | 'claimer' | 'scavenger' | 'courier'
+    | 'scout' | 'claimer' | 'reserver' | 'scavenger' | 'courier'
     | 'warrior' | 'ranger' | 'healer';
 
 declare global {
@@ -42,12 +42,17 @@ declare global {
         working: boolean;
         targetRoomName?: string;
         scoutComplete?: boolean;
-        sourceId?: Id<Source>;   // harvesters: assigned source
-        platoonId?: string;      // warriors/rangers: rally group id
-        homeRoom?: string;       // room this creep was spawned in; used for retreat and dispatch recall
-        defendingRoom?: string;  // set by defenseManager when this unit is dispatched to a remote room
-        scavengeRoom?: string;   // scavengers: optional remote room to loot after own room is clear
-        courierTarget?: string;  // couriers: destination room to deliver energy to
+        sourceId?: Id<Source>;      // harvesters: assigned source
+        platoonId?: string;         // warriors/rangers: rally group id
+        homeRoom?: string;          // room this creep was spawned in; used for retreat and dispatch recall
+        defendingRoom?: string;     // set by defenseManager when this unit is dispatched to a remote room
+        scavengeRoom?: string;      // scavengers: optional remote room to loot after own room is clear
+        courierTarget?: string;     // couriers: destination room to deliver energy to
+        remoteRoom?: string;        // remote harvesters/haulers: which reserved room to work in
+        reserveRoom?: string;       // reservers: which room's controller to keep reserved
+        quadId?: string;            // quad combat units: which quad formation they belong to
+        isQuadLeader?: boolean;     // quad: the unit that picks movement targets for the group
+        targetId?: string;          // CPU cache: avoids findClosestByPath every tick
     }
 
     // Per-room economy tracking (stored on room.memory so multi-room setups don't clobber each other)
@@ -74,6 +79,14 @@ declare global {
         coordinatedAttackTick?: number;
         // Inter-room energy balance
         energySurplus?: number;         // computed by transferManager: excess e/tick this room can donate
+        // Remote mining — per-remote-room spawn targets written by remoteManager
+        remoteRooms?: Record<string, {
+            sources: number;            // how many sources the remote room has
+            miners: number;             // target miner count for this remote room
+            haulers: number;            // target remote hauler count for this remote room
+            reservedUntil: number;      // tick when reservation expires (used to decide reserver respawn)
+        }>;
+        sourceDistances?: Record<string, number>; // sourceId → path distance to storage (cached)
     }
 
     interface Memory {

@@ -1,6 +1,7 @@
-// Advanced combat unit replacing basic attacker.
-// Has HEAL parts, retreat logic, and obeys the global RALLY/MARCH/ENGAGE state.
-const RETREAT_THRESHOLD = 0.3; // retreat when HP falls below 30%
+// Advanced combat unit.
+// Has HEAL parts, retreat logic, and obeys per-room RALLY/MARCH/ENGAGE state.
+// When assigned to a quad, uses quad-coordinated target ID (set by quadManager).
+const RETREAT_THRESHOLD = 0.3;
 
 export function runWarrior(creep: Creep): void {
     // Always try to heal self if damaged (HEAL action is independent of movement)
@@ -155,7 +156,11 @@ function travelHome(creep: Creep): void {
 }
 
 function engageInRoom(creep: Creep): void {
-    const target = findCombatTarget(creep);
+    // Quad-coordinated target takes priority (set by quadManager)
+    const quadTarget = creep.memory.targetId
+        ? Game.getObjectById(creep.memory.targetId as Id<Creep | AnyOwnedStructure>)
+        : null;
+    const target = (quadTarget as Creep | AnyOwnedStructure | null) ?? findCombatTarget(creep);
     if (!target) {
         // Patrol center — there may be nothing left to attack
         creep.moveTo(new RoomPosition(25, 25, creep.room.name), { reusePath: 10 });

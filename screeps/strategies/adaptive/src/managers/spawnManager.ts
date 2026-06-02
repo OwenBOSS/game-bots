@@ -10,8 +10,8 @@ const DOWNGRADE_EMERGENCY_THRESHOLD = 4000;
 // Combat targets per phase — these OVERLAY the dynamic economy targets
 const COMBAT_TARGETS: Record<GamePhase, { warrior: number; ranger: number; healer: number; repairer: number }> = {
     ECONOMY: { warrior: 0, ranger: 0, healer: 0, repairer: 0 },
-    ASSESS:  { warrior: 0, ranger: 0, healer: 0, repairer: 0 },
-    RUSH:    { warrior: 6, ranger: 2, healer: 2, repairer: 0 },
+    ASSESS:  { warrior: 2, ranger: 1, healer: 0, repairer: 0 },  // pre-stage a raid party while scouting
+    RUSH:    { warrior: 8, ranger: 4, healer: 2, repairer: 0 },  // was warrior:6 ranger:2
     DEFEND:  { warrior: 4, ranger: 2, healer: 2, repairer: 2 },
 };
 
@@ -70,7 +70,6 @@ export function manageSpawns(room: Room): void {
     }
 
     // ── Economy roles — respect energy level ─────────────────────────────────
-    // In DEFICIT/CRITICAL don't spawn new haulers/upgraders (save energy for harvesters)
     const canSpawnEconomy = status.level !== 'CRITICAL';
 
     const ecoRoles: { role: CreepRole; target: number; extra?: Partial<CreepMemory> }[] = [
@@ -86,6 +85,39 @@ export function manageSpawns(room: Room): void {
         for (const { role, target, extra } of ecoRoles) {
             if ((counts[role] ?? 0) < target) {
                 trySpawn(spawn, role, room.energyAvailable, extra);
+                return;
+            }
+        }
+    }
+
+    // ── Remote mining: reservers + remote miners + remote haulers ─────────────
+    if (canSpawnEconomy) {
+        for (const [remoteName, rt] of Object.entries(room.memory.remoteRooms ?? {})) {
+            // Reserver: keep the room reserved
+            const needsReserver = rt.reservedUntil < Game.time + 500;
+            const hasReserver = creeps.some(c =>
+                c.memory.role === 'reserver' && c.memory.targetRoomName === remoteName
+            );
+            if (needsReserver && !hasReserver) {
+                trySpawn(spawn, 'reserver', room.energyAvailable, { targetRoomName: remoteName });
+                return;
+            }
+
+            // Remote miners (harvesters assigned to remoteRoom)
+            const currentMiners = creeps.filter(c =>
+                c.memory.role === 'harvester' && c.memory.remoteRoom === remoteName
+            ).length;
+            if (currentMiners < rt.miners) {
+                trySpawn(spawn, 'harvester', room.energyAvailable, { remoteRoom: remoteName });
+                return;
+            }
+
+            // Remote haulers
+            const currentHaulers = creeps.filter(c =>
+                c.memory.role === 'hauler' && c.memory.remoteRoom === remoteName
+            ).length;
+            if (currentHaulers < rt.haulers) {
+                trySpawn(spawn, 'hauler', room.energyAvailable, { remoteRoom: remoteName });
                 return;
             }
         }
