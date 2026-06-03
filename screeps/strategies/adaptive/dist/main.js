@@ -1020,6 +1020,17 @@ function moveToRoom$5(creep, roomName) {
 // Returns home and deposits into storage, containers, or spawns.
 const MIN_LOOT_AMOUNT = 30; // ignore tiny piles not worth the trip
 function runScavenger(creep) {
+    // Auto-dispatch to enemy room while our fighters are engaged there so we can
+    // collect energy dropped by killed harvesters/haulers.  Clear it once combat ends.
+    const homeRoom = creep.memory.homeRoom ? Game.rooms[creep.memory.homeRoom] : undefined;
+    const enemyRoom = homeRoom === null || homeRoom === void 0 ? void 0 : homeRoom.memory.enemyRoomName;
+    const combatActive = (homeRoom === null || homeRoom === void 0 ? void 0 : homeRoom.memory.combatState) === 'ENGAGE' || (homeRoom === null || homeRoom === void 0 ? void 0 : homeRoom.memory.combatState) === 'MARCH';
+    if (combatActive && enemyRoom && !creep.memory.scavengeRoom) {
+        creep.memory.scavengeRoom = enemyRoom;
+    }
+    else if (!combatActive && creep.memory.scavengeRoom && creep.memory.scavengeRoom === enemyRoom) {
+        creep.memory.scavengeRoom = undefined;
+    }
     if (creep.memory.working && creep.store[RESOURCE_ENERGY] === 0) {
         creep.memory.working = false;
     }
@@ -1243,6 +1254,178 @@ function moveToRoom$3(creep, roomName) {
     }
 }
 
+// Quad squad manager.
+// Forms 4-creep attack groups (2 warriors + 2 rangers) for coordinated assault.
+//
+// Advantages over individual platoons:
+//  - Focused fire drains one tower at a time (empty tower = neutralized)
+//  - Mutual ranged-heal keeps the quad alive much longer
+//  - Combined body parts survive damage that would kill any individual
+//
+// Quad states follow room.memory.combatState (RALLY/MARCH/ENGAGE).
+// Each quad has a leader (isQuadLeader=true) who picks targets.
+// Non-leaders move to stay within 2 tiles of the leader.
+const FORM_UP_RANGE = 2; // non-leaders stay within this many tiles of leader
+function manageQuads(room) {
+    var _a, _b;
+    if (((_a = room.memory.combatState) !== null && _a !== void 0 ? _a : 'RALLY') === 'RALLY') {
+        formQuads(room);
+    }
+    // MARCH/ENGAGE: individual roles handle movement, quadManager handles targeting
+    if (((_b = room.memory.combatState) !== null && _b !== void 0 ? _b : 'RALLY') !== 'RALLY') {
+        coordinateQuadTargets(room);
+    }
+}
+// ─── Formation ────────────────────────────────────────────────────────────────
+// Groups unassigned fighters into quads when enough units are available.
+function formQuads(room) {
+    const fighters = room.find(FIND_MY_CREEPS, {
+        filter: c => (c.memory.role === 'warrior' || c.memory.role === 'ranger') &&
+            c.memory.homeRoom === room.name &&
+            !c.memory.quadId,
+    });
+    const warriors = fighters.filter(c => c.memory.role === 'warrior');
+    const rangers = fighters.filter(c => c.memory.role === 'ranger');
+    // Form quads as long as we have 2 warriors + 2 rangers available
+    let quadIndex = nextQuadIndex(room.name);
+    while (warriors.length >= 2 && rangers.length >= 2) {
+        const quadId = `quad_${room.name}_${quadIndex++}`;
+        const members = [
+            warriors.splice(0, 2),
+            rangers.splice(0, 2),
+        ].flat();
+        members[0].memory.quadId = quadId;
+        members[0].memory.isQuadLeader = true;
+        for (const m of members.slice(1)) {
+            m.memory.quadId = quadId;
+            m.memory.isQuadLeader = false;
+        }
+    }
+}
+function nextQuadIndex(roomName) {
+    var _a;
+    let max = 0;
+    for (const name in Game.creeps) {
+        const qid = Game.creeps[name].memory.quadId;
+        if (qid && qid.startsWith(`quad_${roomName}_`)) {
+            const n = parseInt((_a = qid.split('_').pop()) !== null && _a !== void 0 ? _a : '0', 10);
+            if (n >= max)
+                max = n + 1;
+        }
+    }
+    return max;
+}
+// ─── Coordinated targeting ───────────────────────────────────────────────────
+// All members of a quad focus the same target — the tower with lowest energy first
+// (drain it completely → neutralize it), then enemy creeps, then spawns.
+function coordinateQuadTargets(room) {
+    // Collect quad IDs for units homed in this room only (avoids cross-room conflicts).
+    const quadIds = new Set();
+    for (const name in Game.creeps) {
+        const c = Game.creeps[name];
+        if (c.memory.quadId && c.memory.homeRoom === room.name)
+            quadIds.add(c.memory.quadId);
+    }
+    for (const quadId of quadIds) {
+        const members = Object.values(Game.creeps).filter(c => c.memory.quadId === quadId);
+        const leader = members.find(c => c.memory.isQuadLeader);
+        if (!leader)
+            continue;
+        // Pick targets based on where the leader currently is — during ENGAGE the leader
+        // is in the enemy room, not the home room, so we must not filter on room.name.
+        const leaderRoom = Game.rooms[leader.room.name];
+        if (!leaderRoom)
+            continue;
+        const target = pickQuadTarget(leaderRoom);
+        if (!target)
+            continue;
+        // Share the target ID with all quad members so they all focus it
+        for (const m of members) {
+            m.memory.targetId = target.id;
+        }
+    }
+}
+// Target priority (room takeover focus):
+//   towers → active combat threats → reserver → economy creeps → passive/fleeing combatants
+//
+// "Active threat" means the enemy has working combat parts AND is within its attack range
+// of at least one of our units.  Enemies that are kiting/fleeing fall to the bottom so we
+// stay focused on killing the reserver and economy creeps, which is what actually takes
+// over the room.  Once there are no economy targets left, passive combatants are cleaned up.
+function pickQuadTarget(room) {
+    var _a;
+    const towers = room.find(FIND_HOSTILE_STRUCTURES, {
+        filter: s => s.structureType === STRUCTURE_TOWER,
+    });
+    if (towers.length > 0) {
+        return towers.reduce((a, b) => a.store[RESOURCE_ENERGY] < b.store[RESOURCE_ENERGY] ? a : b);
+    }
+    const creeps = room.find(FIND_HOSTILE_CREEPS);
+    const ourUnits = room.find(FIND_MY_CREEPS);
+    if (creeps.length > 0) {
+        // 1. Active threats: enemy combat parts are in range of our units right now.
+        //    Must deal with them immediately or we take avoidable damage.
+        const activeThreats = creeps.filter(c => isEngaging$2(c, ourUnits));
+        if (activeThreats.length > 0) {
+            return activeThreats.reduce((a, b) => threatScore$1(b) > threatScore$1(a) ? b : a);
+        }
+        // 2. Reserver — removing their claim lets our reserver take the controller.
+        const reserver = creeps.find(c => c.body.some(p => p.type === CLAIM));
+        if (reserver)
+            return reserver;
+        // 3. Economy creeps (harvesters/haulers) — soft targets; loot drops on death.
+        const economy = creeps.find(c => c.body.some(p => p.type === WORK || p.type === CARRY));
+        if (economy)
+            return economy;
+        // 4. Passive/fleeing combat creeps — low priority while economy targets remain;
+        //    once the room is clear of economy we mop these up too.
+        return creeps.reduce((a, b) => threatScore$1(b) > threatScore$1(a) ? b : a);
+    }
+    const spawns = room.find(FIND_HOSTILE_STRUCTURES, {
+        filter: s => s.structureType === STRUCTURE_SPAWN,
+    });
+    if (spawns.length > 0)
+        return spawns[0];
+    return (_a = room.find(FIND_HOSTILE_STRUCTURES)[0]) !== null && _a !== void 0 ? _a : null;
+}
+// Returns true when an enemy has LIVE combat parts (ATTACK or RANGED_ATTACK) and is
+// within their effective attack range of at least one of our units.
+// HEAL parts are not included — healers don't directly damage our creeps.
+function isEngaging$2(enemy, allies) {
+    const meleeRange = enemy.body.some(p => p.type === ATTACK && p.hits > 0) ? 1 : 0;
+    const rangedRange = enemy.body.some(p => p.type === RANGED_ATTACK && p.hits > 0) ? 3 : 0;
+    const attackRange = Math.max(meleeRange, rangedRange);
+    if (attackRange === 0)
+        return false;
+    return allies.some(ally => enemy.pos.getRangeTo(ally) <= attackRange);
+}
+// ─── Helpers ─────────────────────────────────────────────────────────────────
+// Called by warrior/ranger roles: move non-leaders to stay near their leader.
+function followQuadLeader(creep) {
+    if (!creep.memory.quadId || creep.memory.isQuadLeader)
+        return false;
+    const leader = Object.values(Game.creeps).find(c => c.memory.quadId === creep.memory.quadId && c.memory.isQuadLeader);
+    if (!leader || leader.room.name !== creep.room.name)
+        return false;
+    const range = creep.pos.getRangeTo(leader);
+    if (range > FORM_UP_RANGE) {
+        creep.moveTo(leader, { reusePath: 2 });
+        return true; // consumed movement action
+    }
+    return false;
+}
+function threatScore$1(c) {
+    return c.body.reduce((n, p) => {
+        if (p.type === ATTACK)
+            return n + 3;
+        if (p.type === RANGED_ATTACK)
+            return n + 2;
+        if (p.type === HEAL)
+            return n + 1;
+        return n;
+    }, 0);
+}
+
 // Advanced combat unit.
 // Has HEAL parts, retreat logic, and obeys per-room RALLY/MARCH/ENGAGE state.
 // When assigned to a quad, uses quad-coordinated target ID (set by quadManager).
@@ -1424,14 +1607,29 @@ function travelHome$2(creep) {
 }
 function engageInRoom(creep) {
     var _a;
-    // Quad-coordinated target takes priority (set by quadManager)
+    // Bait guard: if targetId is a stale hostile creep (e.g. orphaned from a dissolved quad)
+    // that is no longer actively engaging us, discard it when priority targets remain.
+    // This prevents warriors from chasing a kiting combat unit while the reserver/economy
+    // creeps are alive and uncontested.  Quad members are unaffected — their targetId is
+    // refreshed every tick by coordinateQuadTargets before this function runs.
+    if (creep.memory.targetId) {
+        const cached = Game.getObjectById(creep.memory.targetId);
+        if (cached && 'body' in cached) {
+            const ourUnits = creep.room.find(FIND_MY_CREEPS);
+            if (!isEngaging$1(cached, ourUnits) && hasPriorityTargets$1(creep.room)) {
+                creep.memory.targetId = undefined;
+            }
+        }
+    }
+    // Quad-coordinated target takes priority (set by quadManager, refreshed every tick)
     const quadTarget = creep.memory.targetId
         ? Game.getObjectById(creep.memory.targetId)
         : null;
     const target = (_a = quadTarget) !== null && _a !== void 0 ? _a : findCombatTarget(creep);
     if (!target) {
         // Patrol center — there may be nothing left to attack
-        moveTo(creep, new RoomPosition(25, 25, creep.room.name), { reusePath: 10 });
+        if (!followQuadLeader(creep))
+            moveTo(creep, new RoomPosition(25, 25, creep.room.name), { reusePath: 10 });
         return;
     }
     const range = creep.pos.getRangeTo(target);
@@ -1440,30 +1638,62 @@ function engageInRoom(creep) {
     if (hasRanged && range <= 3) {
         creep.rangedAttack(target);
     }
-    // Melee attack if adjacent
+    // Melee attack if adjacent; otherwise move — quad non-leaders follow their
+    // leader first so the formation stays tight, leaders move directly to target.
     if (range <= 1) {
         creep.attack(target);
     }
-    else {
+    else if (!followQuadLeader(creep)) {
         moveTo(creep, target, { reusePath: 3 });
     }
 }
 function findCombatTarget(creep) {
-    // Priority: towers (greatest threat) > spawn (disables economy) > other creeps > structures
+    // Mirrors pickQuadTarget priority — see quadManager.ts for the full rationale.
+    // Independent (non-quad) warriors use findClosestByPath so multiple warriors
+    // naturally spread across different economy targets rather than piling on one.
     const tower = creep.pos.findClosestByPath(FIND_HOSTILE_STRUCTURES, {
         filter: s => s.structureType === STRUCTURE_TOWER,
     });
     if (tower)
         return tower;
+    const allHostiles = creep.room.find(FIND_HOSTILE_CREEPS);
+    const ourUnits = creep.room.find(FIND_MY_CREEPS);
+    // 1. Active threats only — enemy combat parts within attack range of any of our units.
+    const threat = creep.pos.findClosestByPath(allHostiles.filter(c => isEngaging$1(c, ourUnits)));
+    if (threat)
+        return threat;
+    // 2. Reserver — kills their controller reservation.
+    const reserver = creep.pos.findClosestByPath(allHostiles.filter(c => c.body.some(p => p.type === CLAIM)));
+    if (reserver)
+        return reserver;
+    // 3. Economy creeps (harvesters/haulers) — findClosestByPath spreads warriors across targets.
+    const economy = creep.pos.findClosestByPath(allHostiles.filter(c => c.body.some(p => p.type === WORK || p.type === CARRY)));
+    if (economy)
+        return economy;
+    // 4. Passive/fleeing combatants — only once the room is clear of economy targets.
+    if (allHostiles.length > 0)
+        return creep.pos.findClosestByPath(allHostiles);
     const spawn = creep.pos.findClosestByPath(FIND_HOSTILE_STRUCTURES, {
         filter: s => s.structureType === STRUCTURE_SPAWN,
     });
     if (spawn)
         return spawn;
-    const hostileCreep = creep.pos.findClosestByPath(FIND_HOSTILE_CREEPS);
-    if (hostileCreep)
-        return hostileCreep;
     return creep.pos.findClosestByPath(FIND_HOSTILE_STRUCTURES);
+}
+// True when the enemy has live ATTACK or RANGED_ATTACK parts within their effective
+// attack range of at least one of our creeps — i.e. they are actively engaging us.
+function isEngaging$1(enemy, allies) {
+    const meleeRange = enemy.body.some(p => p.type === ATTACK && p.hits > 0) ? 1 : 0;
+    const rangedRange = enemy.body.some(p => p.type === RANGED_ATTACK && p.hits > 0) ? 3 : 0;
+    const attackRange = Math.max(meleeRange, rangedRange);
+    if (attackRange === 0)
+        return false;
+    return allies.some(ally => enemy.pos.getRangeTo(ally) <= attackRange);
+}
+// True when the room still has reserver/economy creeps — used by the bait guard to
+// decide whether ignoring a non-engaging combatant is the right call.
+function hasPriorityTargets$1(room) {
+    return room.find(FIND_HOSTILE_CREEPS).some(c => c.body.some(p => p.type === CLAIM || p.type === WORK || p.type === CARRY));
 }
 function moveToRoom$2(creep, roomName) {
     const exitDir = creep.room.findExitTo(roomName);
@@ -1518,13 +1748,24 @@ function engage(creep) {
         creep.rangedMassAttack();
         return;
     }
-    // Quad-coordinated target takes priority
+    // Bait guard — mirrors warrior.ts engageInRoom; see there for full rationale.
+    if (creep.memory.targetId) {
+        const cached = Game.getObjectById(creep.memory.targetId);
+        if (cached && 'body' in cached) {
+            const ourUnits = creep.room.find(FIND_MY_CREEPS);
+            if (!isEngaging(cached, ourUnits) && hasPriorityTargets(creep.room)) {
+                creep.memory.targetId = undefined;
+            }
+        }
+    }
+    // Quad-coordinated target takes priority (refreshed every tick by coordinateQuadTargets)
     const quadTarget = creep.memory.targetId
         ? Game.getObjectById(creep.memory.targetId)
         : null;
     const target = (_a = quadTarget) !== null && _a !== void 0 ? _a : findTarget(creep);
     if (!target) {
-        moveTo(creep, new RoomPosition(25, 25, creep.room.name), { reusePath: 10 });
+        if (!followQuadLeader(creep))
+            moveTo(creep, new RoomPosition(25, 25, creep.room.name), { reusePath: 10 });
         return;
     }
     const range = creep.pos.getRangeTo(target);
@@ -1532,29 +1773,57 @@ function engage(creep) {
         creep.rangedAttack(target);
     }
     if (range > KITE_RANGE) {
-        // Close in
-        moveTo(creep, target, { reusePath: 3 });
+        // Close in — quad non-leaders follow their leader to keep formation tight
+        if (!followQuadLeader(creep))
+            moveTo(creep, target, { reusePath: 3 });
     }
     else if (range < 2) {
-        // Kite away from melee enemies
-        const dx = creep.pos.x - target.pos.x;
-        const dy = creep.pos.y - target.pos.y;
-        const kiteDir = getDirection(dx, dy);
-        if (kiteDir)
-            creep.move(kiteDir);
+        // Too close for ranged — kite away (leaders and solo rangers only;
+        // non-leaders defer to followQuadLeader which keeps them near the leader)
+        if (creep.memory.isQuadLeader || !creep.memory.quadId) {
+            const dx = creep.pos.x - target.pos.x;
+            const dy = creep.pos.y - target.pos.y;
+            const kiteDir = getDirection(dx, dy);
+            if (kiteDir)
+                creep.move(kiteDir);
+        }
+        else {
+            followQuadLeader(creep);
+        }
     }
 }
 function findTarget(creep) {
-    // Rangers prioritize towers (high-value threat) then structures then creeps
+    // Same priority as warrior findCombatTarget — active threats → reserver → economy → fleeing.
     const tower = creep.pos.findClosestByPath(FIND_HOSTILE_STRUCTURES, {
         filter: s => s.structureType === STRUCTURE_TOWER,
     });
     if (tower)
         return tower;
-    const hostile = creep.pos.findClosestByPath(FIND_HOSTILE_CREEPS);
-    if (hostile)
-        return hostile;
+    const allHostiles = creep.room.find(FIND_HOSTILE_CREEPS);
+    const ourUnits = creep.room.find(FIND_MY_CREEPS);
+    const threat = creep.pos.findClosestByPath(allHostiles.filter(c => isEngaging(c, ourUnits)));
+    if (threat)
+        return threat;
+    const reserver = creep.pos.findClosestByPath(allHostiles.filter(c => c.body.some(p => p.type === CLAIM)));
+    if (reserver)
+        return reserver;
+    const economy = creep.pos.findClosestByPath(allHostiles.filter(c => c.body.some(p => p.type === WORK || p.type === CARRY)));
+    if (economy)
+        return economy;
+    if (allHostiles.length > 0)
+        return creep.pos.findClosestByPath(allHostiles);
     return creep.pos.findClosestByPath(FIND_HOSTILE_STRUCTURES);
+}
+function isEngaging(enemy, allies) {
+    const meleeRange = enemy.body.some(p => p.type === ATTACK && p.hits > 0) ? 1 : 0;
+    const rangedRange = enemy.body.some(p => p.type === RANGED_ATTACK && p.hits > 0) ? 3 : 0;
+    const attackRange = Math.max(meleeRange, rangedRange);
+    if (attackRange === 0)
+        return false;
+    return allies.some(ally => enemy.pos.getRangeTo(ally) <= attackRange);
+}
+function hasPriorityTargets(room) {
+    return room.find(FIND_HOSTILE_CREEPS).some(c => c.body.some(p => p.type === CLAIM || p.type === WORK || p.type === CARRY));
 }
 function executeMarch(creep) {
     var _a, _b, _c;
@@ -3521,123 +3790,6 @@ function getActivePlatoonIds(homeRoom) {
     return [...ids].sort();
 }
 
-// Quad squad manager.
-// Forms 4-creep attack groups (2 warriors + 2 rangers) for coordinated assault.
-//
-// Advantages over individual platoons:
-//  - Focused fire drains one tower at a time (empty tower = neutralized)
-//  - Mutual ranged-heal keeps the quad alive much longer
-//  - Combined body parts survive damage that would kill any individual
-//
-// Quad states follow room.memory.combatState (RALLY/MARCH/ENGAGE).
-// Each quad has a leader (isQuadLeader=true) who picks targets.
-// Non-leaders move to stay within 2 tiles of the leader.
-function manageQuads(room) {
-    var _a, _b;
-    if (((_a = room.memory.combatState) !== null && _a !== void 0 ? _a : 'RALLY') === 'RALLY') {
-        formQuads(room);
-    }
-    // MARCH/ENGAGE: individual roles handle movement, quadManager handles targeting
-    if (((_b = room.memory.combatState) !== null && _b !== void 0 ? _b : 'RALLY') !== 'RALLY') {
-        coordinateQuadTargets(room);
-    }
-}
-// ─── Formation ────────────────────────────────────────────────────────────────
-// Groups unassigned fighters into quads when enough units are available.
-function formQuads(room) {
-    const fighters = room.find(FIND_MY_CREEPS, {
-        filter: c => (c.memory.role === 'warrior' || c.memory.role === 'ranger') &&
-            c.memory.homeRoom === room.name &&
-            !c.memory.quadId,
-    });
-    const warriors = fighters.filter(c => c.memory.role === 'warrior');
-    const rangers = fighters.filter(c => c.memory.role === 'ranger');
-    // Form quads as long as we have 2 warriors + 2 rangers available
-    let quadIndex = nextQuadIndex(room.name);
-    while (warriors.length >= 2 && rangers.length >= 2) {
-        const quadId = `quad_${room.name}_${quadIndex++}`;
-        const members = [
-            warriors.splice(0, 2),
-            rangers.splice(0, 2),
-        ].flat();
-        members[0].memory.quadId = quadId;
-        members[0].memory.isQuadLeader = true;
-        for (const m of members.slice(1)) {
-            m.memory.quadId = quadId;
-            m.memory.isQuadLeader = false;
-        }
-    }
-}
-function nextQuadIndex(roomName) {
-    var _a;
-    let max = 0;
-    for (const name in Game.creeps) {
-        const qid = Game.creeps[name].memory.quadId;
-        if (qid && qid.startsWith(`quad_${roomName}_`)) {
-            const n = parseInt((_a = qid.split('_').pop()) !== null && _a !== void 0 ? _a : '0', 10);
-            if (n >= max)
-                max = n + 1;
-        }
-    }
-    return max;
-}
-// ─── Coordinated targeting ───────────────────────────────────────────────────
-// All members of a quad focus the same target — the tower with lowest energy first
-// (drain it completely → neutralize it), then enemy creeps, then spawns.
-function coordinateQuadTargets(room) {
-    const quadIds = new Set();
-    for (const name in Game.creeps) {
-        const qid = Game.creeps[name].memory.quadId;
-        if (qid)
-            quadIds.add(qid);
-    }
-    for (const quadId of quadIds) {
-        const members = Object.values(Game.creeps).filter(c => c.memory.quadId === quadId);
-        const leader = members.find(c => c.memory.isQuadLeader);
-        if (!leader || leader.room.name !== room.name)
-            continue;
-        const target = pickQuadTarget(leader.room);
-        if (!target)
-            continue;
-        // Share the target ID with all quad members so they all focus it
-        for (const m of members) {
-            m.memory.targetId = target.id;
-        }
-    }
-}
-// Tower with lowest energy (drain focus) → hostile creep (most ATTACK parts) → spawn → structure
-function pickQuadTarget(room) {
-    var _a;
-    const towers = room.find(FIND_HOSTILE_STRUCTURES, {
-        filter: s => s.structureType === STRUCTURE_TOWER,
-    });
-    if (towers.length > 0) {
-        // Target the least-charged tower — empty towers are fully neutralized
-        return towers.reduce((a, b) => a.store[RESOURCE_ENERGY] < b.store[RESOURCE_ENERGY] ? a : b);
-    }
-    const creeps = room.find(FIND_HOSTILE_CREEPS);
-    if (creeps.length > 0) {
-        return creeps.reduce((a, b) => threatScore$1(b) > threatScore$1(a) ? b : a);
-    }
-    const spawns = room.find(FIND_HOSTILE_STRUCTURES, {
-        filter: s => s.structureType === STRUCTURE_SPAWN,
-    });
-    if (spawns.length > 0)
-        return spawns[0];
-    return (_a = room.find(FIND_HOSTILE_STRUCTURES)[0]) !== null && _a !== void 0 ? _a : null;
-}
-function threatScore$1(c) {
-    return c.body.reduce((n, p) => {
-        if (p.type === ATTACK)
-            return n + 3;
-        if (p.type === RANGED_ATTACK)
-            return n + 2;
-        if (p.type === HEAL)
-            return n + 1;
-        return n;
-    }, 0);
-}
-
 const MIN_FIGHTERS_TO_MARCH = 4;
 const MIN_HEALERS_TO_MARCH = 1;
 const RAID_STRENGTH_MAX = 15; // raid without healer if enemy this weak
@@ -3820,10 +3972,11 @@ function getFortifyTarget(room) {
 // ─── Per-room combat state machine ───────────────────────────────────────────
 function manageCombatState(room) {
     var _a, _b;
-    const allCombat = room.find(FIND_MY_CREEPS, {
-        filter: c => (c.memory.role === 'warrior' || c.memory.role === 'ranger' || c.memory.role === 'healer') &&
-            c.memory.homeRoom === room.name,
-    });
+    // Must use global creep registry — room.find() only sees creeps physically present in
+    // the home room, so it returns 0 fighters the moment they march to the enemy room,
+    // which would instantly reset combatState to RALLY and create an infinite bounce loop.
+    const allCombat = Object.values(Game.creeps).filter(c => (c.memory.role === 'warrior' || c.memory.role === 'ranger' || c.memory.role === 'healer') &&
+        c.memory.homeRoom === room.name);
     const fighters = allCombat.filter(c => c.memory.role === 'warrior' || c.memory.role === 'ranger');
     const healers = allCombat.filter(c => c.memory.role === 'healer');
     const state = (_a = room.memory.combatState) !== null && _a !== void 0 ? _a : 'RALLY';
@@ -3865,8 +4018,41 @@ function manageCombatState(room) {
                 room.memory.scoutTick = undefined;
                 room.memory.rallyTick = Game.time;
             }
+            // Refresh intel from the battlefield every tick while fighters have visibility.
+            // remoteManager and spawnManager both gate on Memory.roomIntel[enemyRoom].enemyCreeps;
+            // without this, they wait up to 300 ticks for the scout to rescan the cleared room
+            // before spawning our reserver/miners/haulers.
+            if (enemyRoom)
+                refreshBattlefieldIntel(enemyRoom);
             break;
     }
+}
+// Write live intel from the enemy room while our fighters are there.
+// Only runs when we actually have visibility (fighters are in the room → Game.rooms has it).
+// Mirrors recordRoomIntel in scout.ts but does NOT update owned rooms' enemyRoomName —
+// that stays as-is so the attack campaign continues until strategyManager clears it.
+function refreshBattlefieldIntel(roomName) {
+    var _a, _b;
+    const target = Game.rooms[roomName];
+    if (!target)
+        return; // no visibility yet (fighters still travelling)
+    const enemyCreeps = target.find(FIND_HOSTILE_CREEPS).length;
+    const enemySpawns = target.find(FIND_HOSTILE_STRUCTURES, { filter: s => s.structureType === STRUCTURE_SPAWN }).length;
+    const enemyTowers = target.find(FIND_HOSTILE_STRUCTURES, { filter: s => s.structureType === STRUCTURE_TOWER }).length;
+    const strength = enemyCreeps + enemySpawns * 5 + enemyTowers * 8;
+    if (!Memory.roomIntel)
+        Memory.roomIntel = {};
+    const prev = Memory.roomIntel[roomName];
+    Memory.roomIntel[roomName] = {
+        scannedAt: Game.time,
+        enemyCreeps,
+        enemySpawns,
+        enemyTowers,
+        strength,
+        hasController: !!(target.controller),
+        controllerOwned: !!((_a = target.controller) === null || _a === void 0 ? void 0 : _a.owner),
+        sourceCount: (_b = prev === null || prev === void 0 ? void 0 : prev.sourceCount) !== null && _b !== void 0 ? _b : target.find(FIND_SOURCES).length,
+    };
 }
 function assignTargetRoom(units, roomName) {
     for (const u of units)
