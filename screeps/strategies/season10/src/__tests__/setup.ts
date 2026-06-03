@@ -54,6 +54,9 @@
 (global as any).STRUCTURE_OBSERVER   = 'observer';
 (global as any).RESOURCE_ENERGY      = 'energy';
 
+// Find constants (additional)
+(global as any).FIND_CONSTRUCTION_SITES  = 109;
+
 // Return codes
 (global as any).OK                       = 0;
 (global as any).ERR_NOT_IN_RANGE         = -9;

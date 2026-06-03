@@ -42,7 +42,7 @@ declare global {
     }
 
     interface CreepMemory {
-        role: 'harvester' | 'collector' | 'hauler' | 'scout' | 'hunter';
+        role: 'harvester' | 'collector' | 'hauler' | 'scout' | 'hunter' | 'builder';
         working: boolean;
         targetId?: string;
         targetRoom?: string;
@@ -60,6 +60,9 @@ declare global {
         dynamicCollectorQuota?: boolean;
         collectorsAboveUpgraders?: boolean;
         observerEnabled?: boolean;
+        containerSitesPlaced?: boolean;
+        towerSitePlaced?: boolean;
+        storageSitePlaced?: boolean;
     }
 
     interface Memory {

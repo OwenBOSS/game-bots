@@ -2,10 +2,14 @@ import { resetTickCache } from './utils/tickCache';
 import { trackScores } from './managers/scoreTracker';
 import { manageSpawns } from './managers/spawnManager';
 import { checkRCTransition } from './managers/rcTransitionManager';
+import { manageConstruction } from './managers/constructionManager';
+import { manageTowers } from './managers/towerManager';
 import { runObserver } from './managers/observerManager';
 import { runHarvester } from './roles/harvester';
 import { runCollector } from './roles/collector';
 import { runScout } from './roles/scout';
+import { runBuilder } from './roles/builder';
+import { runHunter } from './roles/hunter';
 
 export function loop(): void {
     // 1. Reset per-tick find() cache (CPU budget: avoids duplicate room.find calls)
@@ -34,6 +38,8 @@ export function loop(): void {
         if (!room.controller?.my) continue;
 
         checkRCTransition(room);
+        manageConstruction(room);
+        manageTowers(room);
         manageSpawns(room);
 
         // RC8: run observer rotation once per tick
@@ -52,6 +58,8 @@ export function loop(): void {
             case 'harvester': runHarvester(creep); break;
             case 'collector': runCollector(creep); break;
             case 'scout':     runScout(creep);     break;
+            case 'builder':   runBuilder(creep);   break;
+            case 'hunter':    runHunter(creep);    break;
         }
     }
 

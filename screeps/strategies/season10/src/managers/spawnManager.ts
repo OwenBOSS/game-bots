@@ -1,9 +1,10 @@
 // Season 10 spawn manager — RC-level aware, uses bodyBuilder for correct body selection.
-// Priority: harvesters → scouts (RC1) → collectors (RC2+) → collectors above upgraders (RC5+).
+// Priority: harvesters → scouts (RC1) → builder (RC2+) → collectors → hunters (conditional).
 
-import { buildCollectorBody, buildHarvesterBody, buildScoutBody } from '../utils/bodyBuilder';
+import { buildCollectorBody, buildHarvesterBody, buildScoutBody, buildHunterBody } from '../utils/bodyBuilder';
 
 const MIN_HARVESTERS = 2;
+const MAX_BUILDERS = 1; // one builder until infrastructure is complete
 
 export function getCollectorQuota(room: Room): number {
     const storage = room.storage;
@@ -25,6 +26,9 @@ export function manageSpawns(room: Room): void {
     const collectors = creeps.filter((c: Creep) => c.memory.role === 'collector').length;
     const scouts     = creeps.filter((c: Creep) => c.memory.role === 'scout').length;
 
+    const builders = creeps.filter((c: Creep) => c.memory.role === 'builder').length;
+    const hunters  = creeps.filter((c: Creep) => c.memory.role === 'hunter').length;
+
     const level = room.controller?.level ?? 1;
     const mem   = room.memory as RoomMemory;
 
@@ -40,13 +44,25 @@ export function manageSpawns(room: Room): void {
         return;
     }
 
-    // 3. Determine collector quota
+    // 3. RC2+: keep one builder when there are active construction sites
+    const hasSites = room.find(FIND_CONSTRUCTION_SITES).length > 0;
+    if (level >= 2 && builders < MAX_BUILDERS && hasSites) {
+        trySpawn(spawn, 'builder', buildHarvesterBody(room.energyAvailable));
+        return;
+    }
+
+    // 4. Determine collector quota
     const quota = resolveCollectorQuota(room, level, mem);
 
-    // 4. Spawn collector if under quota
+    // 5. Spawn collector if under quota
     if (collectors < quota) {
         trySpawn(spawn, 'collector', buildCollectorBody(room.energyAvailable));
         return;
+    }
+
+    // 6. Spawn hunter if enemy collectors detected near Score rooms (RC3+)
+    if (level >= 3 && hunters < 1 && enemiesNearScores()) {
+        trySpawn(spawn, 'hunter', buildHunterBody(room.energyAvailable));
     }
 }
 
@@ -58,6 +74,16 @@ function resolveCollectorQuota(room: Room, level: number, mem: RoomMemory): numb
     if (level >= 3) return 3;
     if (level >= 2) return 1;
     return 0; // RC1: no dedicated collector yet
+}
+
+function enemiesNearScores(): boolean {
+    const cache = Memory.scoreCache ?? {};
+    const hotRooms = new Set(Object.values(cache).map(e => e.pos.roomName));
+    for (const roomName of hotRooms) {
+        const room = Game.rooms[roomName];
+        if (room && room.find(FIND_HOSTILE_CREEPS).length > 0) return true;
+    }
+    return false;
 }
 
 function trySpawn(spawn: StructureSpawn, role: string, body: BodyPartConstant[] | null): void {
