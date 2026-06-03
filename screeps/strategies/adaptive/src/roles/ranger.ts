@@ -2,6 +2,7 @@
 // when multiple enemies cluster. Shares rally/march/engage state with warriors.
 
 import { moveTo as smartMove } from '../utils/trafficManager';
+import { followQuadLeader }    from '../managers/quadManager';
 
 const RETREAT_HP = 0.25;
 const KITE_RANGE = 3; // ideal engagement distance
@@ -55,7 +56,7 @@ function engage(creep: Creep): void {
         : null;
     const target = (quadTarget as Creep | AnyOwnedStructure | null) ?? findTarget(creep);
     if (!target) {
-        smartMove(creep,new RoomPosition(25, 25, creep.room.name), { reusePath: 10 });
+        if (!followQuadLeader(creep)) smartMove(creep, new RoomPosition(25, 25, creep.room.name), { reusePath: 10 });
         return;
     }
 
@@ -66,14 +67,19 @@ function engage(creep: Creep): void {
     }
 
     if (range > KITE_RANGE) {
-        // Close in
-        smartMove(creep,target, { reusePath: 3 });
+        // Close in — quad non-leaders follow their leader to keep formation tight
+        if (!followQuadLeader(creep)) smartMove(creep, target, { reusePath: 3 });
     } else if (range < 2) {
-        // Kite away from melee enemies
-        const dx = creep.pos.x - (target as Creep).pos.x;
-        const dy = creep.pos.y - (target as Creep).pos.y;
-        const kiteDir = getDirection(dx, dy);
-        if (kiteDir) creep.move(kiteDir);
+        // Too close for ranged — kite away (leaders and solo rangers only;
+        // non-leaders defer to followQuadLeader which keeps them near the leader)
+        if (creep.memory.isQuadLeader || !creep.memory.quadId) {
+            const dx = creep.pos.x - (target as Creep).pos.x;
+            const dy = creep.pos.y - (target as Creep).pos.y;
+            const kiteDir = getDirection(dx, dy);
+            if (kiteDir) creep.move(kiteDir);
+        } else {
+            followQuadLeader(creep);
+        }
     }
 }
 
