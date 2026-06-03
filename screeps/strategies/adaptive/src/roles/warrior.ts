@@ -184,7 +184,22 @@ function travelHome(creep: Creep): void {
 }
 
 function engageInRoom(creep: Creep): void {
-    // Quad-coordinated target takes priority (set by quadManager)
+    // Bait guard: if targetId is a stale hostile creep (e.g. orphaned from a dissolved quad)
+    // that is no longer actively engaging us, discard it when priority targets remain.
+    // This prevents warriors from chasing a kiting combat unit while the reserver/economy
+    // creeps are alive and uncontested.  Quad members are unaffected — their targetId is
+    // refreshed every tick by coordinateQuadTargets before this function runs.
+    if (creep.memory.targetId) {
+        const cached = Game.getObjectById(creep.memory.targetId as Id<Creep | AnyOwnedStructure>);
+        if (cached && 'body' in (cached as any)) {
+            const ourUnits = creep.room.find(FIND_MY_CREEPS);
+            if (!isEngaging(cached as Creep, ourUnits) && hasPriorityTargets(creep.room)) {
+                creep.memory.targetId = undefined;
+            }
+        }
+    }
+
+    // Quad-coordinated target takes priority (set by quadManager, refreshed every tick)
     const quadTarget = creep.memory.targetId
         ? Game.getObjectById(creep.memory.targetId as Id<Creep | AnyOwnedStructure>)
         : null;
@@ -259,6 +274,14 @@ function isEngaging(enemy: Creep, allies: Creep[]): boolean {
     const attackRange = Math.max(meleeRange, rangedRange);
     if (attackRange === 0) return false;
     return allies.some(ally => enemy.pos.getRangeTo(ally) <= attackRange);
+}
+
+// True when the room still has reserver/economy creeps — used by the bait guard to
+// decide whether ignoring a non-engaging combatant is the right call.
+function hasPriorityTargets(room: Room): boolean {
+    return room.find(FIND_HOSTILE_CREEPS).some(c =>
+        c.body.some(p => p.type === CLAIM || p.type === WORK || p.type === CARRY)
+    );
 }
 
 function moveToRoom(creep: Creep, roomName: string): void {
