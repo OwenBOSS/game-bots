@@ -1,5 +1,107 @@
 'use strict';
 
+// Screeps direction offset tables — indices 1–8 match the direction constants
+// TOP=1, TOP_RIGHT=2, RIGHT=3, BOTTOM_RIGHT=4, BOTTOM=5, BOTTOM_LEFT=6, LEFT=7, TOP_LEFT=8
+const DIR_DX = [0, 0, 1, 1, 1, 0, -1, -1, -1];
+const DIR_DY = [0, -1, -1, 0, 1, 1, 1, 0, -1];
+// ─── Per-tick moved tracking ─────────────────────────────────────────────────
+// Used by shoveBlocker to decide whether a creep already has a move committed.
+let _movedTick = -1;
+const _movedSet = new Set();
+function markMoved(name) {
+    if (Game.time !== _movedTick) {
+        _movedTick = Game.time;
+        _movedSet.clear();
+    }
+    _movedSet.add(name);
+}
+function hasMoved(name) {
+    return Game.time === _movedTick && _movedSet.has(name);
+}
+// ─── Per-tick occupancy cache ─────────────────────────────────────────────────
+// Built once per room per tick; re-used by every moveTo call in that room.
+let _occupancyTick = -1;
+const _occupancy = {};
+function getOccupied(room) {
+    if (Game.time !== _occupancyTick) {
+        _occupancyTick = Game.time;
+        for (const k in _occupancy)
+            delete _occupancy[k];
+    }
+    if (!_occupancy[room.name]) {
+        _occupancy[room.name] = room.find(FIND_MY_CREEPS).map(c => [c.pos.x, c.pos.y]);
+    }
+    return _occupancy[room.name];
+}
+/**
+ * Drop-in replacement for creep.moveTo() with traffic management.
+ *
+ * Two improvements over vanilla moveTo:
+ *
+ *  1. Soft cost matrix — occupied tiles get +3 cost added to the default terrain
+ *     cost. The pathfinder prefers routes around other creeps when alternatives
+ *     exist, but still routes through them in tight corridors (cost 3 is not
+ *     impassable). This spreads creeps naturally without wild routing, unlike
+ *     ignoreCreeps:true (which ignores others entirely and causes convergence
+ *     jams) or ignoreCreeps:false default (which treats occupied tiles as hard
+ *     blocks and produces bizarre detours).
+ *
+ *  2. Cascade shove — if a truly idle friendly creep is blocking the direct path,
+ *     shove it (and its blocker, one level deep) in the same direction so it
+ *     yields before the engine resolves movement. "Truly idle" means it hasn't
+ *     called moveTo this tick via this wrapper.
+ */
+function moveTo(creep, target, opts = {}) {
+    var _a;
+    markMoved(creep.name);
+    const result = creep.moveTo(target, {
+        reusePath: 2,
+        costCallback: (roomName, matrix) => {
+            const room = Game.rooms[roomName];
+            if (!room)
+                return matrix;
+            for (const [x, y] of getOccupied(room)) {
+                const cur = matrix.get(x, y);
+                if (cur < 255)
+                    matrix.set(x, y, Math.min(254, cur + 3));
+            }
+            return matrix;
+        },
+        ...opts,
+    });
+    const targetPos = 'pos' in target
+        ? target.pos
+        : target;
+    const range = (_a = opts.range) !== null && _a !== void 0 ? _a : 1;
+    if (creep.room.name === targetPos.roomName && creep.pos.getRangeTo(targetPos) > range) {
+        shoveBlocker(creep, targetPos);
+    }
+    return result;
+}
+function shoveBlocker(creep, targetPos) {
+    const dir = creep.pos.getDirectionTo(targetPos);
+    shoveInDir(creep, dir, 2);
+}
+// Cascade shove up to `depth` creeps deep in direction `dir`.
+// Recursing first (deepest blocker first) gives the chain a chance to clear.
+function shoveInDir(from, dir, depth) {
+    const nx = from.pos.x + DIR_DX[dir];
+    const ny = from.pos.y + DIR_DY[dir];
+    if (nx < 1 || nx > 48 || ny < 1 || ny > 48)
+        return;
+    const blocker = new RoomPosition(nx, ny, from.room.name)
+        .lookFor(LOOK_CREEPS)
+        .find(c => c.my && c.name !== from.name);
+    if (!blocker || blocker.fatigue > 0)
+        return;
+    if (hasMoved(blocker.name))
+        return;
+    // Clear space for the blocker before shoving it (cascade)
+    if (depth > 1)
+        shoveInDir(blocker, dir, depth - 1);
+    blocker.move(dir);
+}
+
 // Stationary harvester: parks at an assigned source, harvests into the adjacent
 // container. Falls back to mobile delivery if no container exists yet.
 //
@@ -37,7 +139,7 @@ function runRemote(creep) {
     if (container) {
         // Park on container and mine into it — remote hauler will collect
         if (!creep.pos.isEqualTo(container.pos)) {
-            creep.moveTo(container.pos, { reusePath: 10 });
+            moveTo(creep, container.pos, { reusePath: 10 });
             return;
         }
         creep.harvest(source);
@@ -48,14 +150,14 @@ function runRemote(creep) {
     else {
         // No container yet — mine and drop on ground (remote hauler picks up dropped)
         if (creep.harvest(source) === ERR_NOT_IN_RANGE) {
-            creep.moveTo(source, { reusePath: 5 });
+            moveTo(creep, source, { reusePath: 5 });
         }
     }
 }
 // ─── Stationary mode ─────────────────────────────────────────────────────────
 function runStationary(creep, source, container) {
     if (!creep.pos.isEqualTo(container.pos)) {
-        creep.moveTo(container.pos, { reusePath: 10, visualizePathStyle: undefined });
+        moveTo(creep, container.pos, { reusePath: 10, visualizePathStyle: undefined });
         return;
     }
     creep.harvest(source);
@@ -84,35 +186,49 @@ function runMobile(creep, source) {
         const target = findDeliveryTarget(creep);
         if (target) {
             if (creep.transfer(target, RESOURCE_ENERGY) === ERR_NOT_IN_RANGE) {
-                creep.moveTo(target, { reusePath: 5 });
+                moveTo(creep, target, { reusePath: 5 });
             }
         }
         else {
             const controller = creep.room.controller;
             if (controller && creep.upgradeController(controller) === ERR_NOT_IN_RANGE) {
-                creep.moveTo(controller, { reusePath: 5 });
+                moveTo(creep, controller, { reusePath: 5 });
             }
         }
     }
     else {
         if (creep.harvest(source) === ERR_NOT_IN_RANGE) {
-            creep.moveTo(source, { reusePath: 5 });
+            moveTo(creep, source, { reusePath: 5 });
         }
     }
 }
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 function getAssignedSource(creep) {
-    var _a;
-    if (creep.memory.sourceId) {
-        return Game.getObjectById(creep.memory.sourceId);
-    }
+    var _a, _b;
     const sources = creep.room.find(FIND_SOURCES);
+    if (sources.length === 0)
+        return null;
     const counts = new Map();
     for (const c of creep.room.find(FIND_MY_CREEPS)) {
         if (c.memory.role === 'harvester' && c.memory.sourceId) {
             counts.set(c.memory.sourceId, ((_a = counts.get(c.memory.sourceId)) !== null && _a !== void 0 ? _a : 0) + 1);
         }
     }
+    if (creep.memory.sourceId) {
+        const currentLoad = (_b = counts.get(creep.memory.sourceId)) !== null && _b !== void 0 ? _b : 0;
+        // Rebalance: if our source has 2+ more harvesters than another, switch
+        const underloaded = sources.find(s => {
+            var _a;
+            return s.id !== creep.memory.sourceId &&
+                ((_a = counts.get(s.id)) !== null && _a !== void 0 ? _a : 0) < currentLoad - 1;
+        });
+        if (underloaded) {
+            creep.memory.sourceId = underloaded.id;
+            return underloaded;
+        }
+        return Game.getObjectById(creep.memory.sourceId);
+    }
+    // First assignment: least-contested source
     const best = sources.reduce((a, b) => { var _a, _b; return ((_a = counts.get(a.id)) !== null && _a !== void 0 ? _a : 0) <= ((_b = counts.get(b.id)) !== null && _b !== void 0 ? _b : 0) ? a : b; });
     creep.memory.sourceId = best.id;
     return best;
@@ -143,7 +259,7 @@ function findDeliveryTarget(creep) {
     });
 }
 function moveToRoom$7(creep, roomName) {
-    creep.moveTo(new RoomPosition(25, 25, roomName), { reusePath: 20, range: 23 });
+    moveTo(creep, new RoomPosition(25, 25, roomName), { reusePath: 20, range: 23 });
 }
 
 // Hauler: decouples harvesting from delivery.
@@ -167,6 +283,18 @@ function runHauler(creep) {
     }
     else {
         creep.memory.working ? deliver$1(creep) : collect$1(creep);
+        // Eager transition: skip the idle tick when a phase just completed.
+        // Without this, the working-state flip only fires at the top of the NEXT tick,
+        // leaving the creep standing at spawn/container for one wasted tick — the primary
+        // cause of spawn-area pile-ups when multiple haulers finish simultaneously.
+        if (creep.memory.working && creep.store[RESOURCE_ENERGY] === 0) {
+            creep.memory.working = false;
+            collect$1(creep);
+        }
+        else if (!creep.memory.working && creep.store.getFreeCapacity() === 0) {
+            creep.memory.working = true;
+            deliver$1(creep);
+        }
     }
 }
 // ─── Remote mode ─────────────────────────────────────────────────────────────
@@ -182,14 +310,14 @@ function collectRemote(creep) {
     });
     if (tomb) {
         if (creep.withdraw(tomb, RESOURCE_ENERGY) === ERR_NOT_IN_RANGE)
-            creep.moveTo(tomb, { reusePath: 3 });
+            moveTo(creep, tomb, { reusePath: 3 });
         return;
     }
     // Containers (filled by remote miners)
     const container = getCachedContainer(creep, remote);
     if (container) {
         if (creep.withdraw(container, RESOURCE_ENERGY) === ERR_NOT_IN_RANGE) {
-            creep.moveTo(container, { reusePath: 5 });
+            moveTo(creep, container, { reusePath: 5 });
         }
         return;
     }
@@ -199,7 +327,7 @@ function collectRemote(creep) {
     });
     if (dropped) {
         if (creep.pickup(dropped) === ERR_NOT_IN_RANGE)
-            creep.moveTo(dropped, { reusePath: 3 });
+            moveTo(creep, dropped, { reusePath: 3 });
         return;
     }
     // Nothing to collect — go home rather than idle
@@ -219,7 +347,7 @@ function deliverRemote(creep) {
     const storage = creep.room.storage;
     if (storage && storage.store.getFreeCapacity(RESOURCE_ENERGY) > 0) {
         if (creep.transfer(storage, RESOURCE_ENERGY) === ERR_NOT_IN_RANGE) {
-            creep.moveTo(storage, { reusePath: 5 });
+            moveTo(creep, storage, { reusePath: 5 });
         }
         return;
     }
@@ -230,7 +358,7 @@ function deliverRemote(creep) {
     });
     if (spawn) {
         if (creep.transfer(spawn, RESOURCE_ENERGY) === ERR_NOT_IN_RANGE)
-            creep.moveTo(spawn, { reusePath: 5 });
+            moveTo(creep, spawn, { reusePath: 5 });
     }
 }
 // ─── Normal mode ──────────────────────────────────────────────────────────────
@@ -252,7 +380,7 @@ function collect$1(creep) {
     });
     if (link) {
         if (creep.withdraw(link, RESOURCE_ENERGY) === ERR_NOT_IN_RANGE) {
-            creep.moveTo(link, { reusePath: 5 });
+            moveTo(creep, link, { reusePath: 5 });
         }
         return;
     }
@@ -260,7 +388,7 @@ function collect$1(creep) {
     const container = getCachedSourceContainer(creep);
     if (container) {
         if (creep.withdraw(container, RESOURCE_ENERGY) === ERR_NOT_IN_RANGE) {
-            creep.moveTo(container, { reusePath: 5 });
+            moveTo(creep, container, { reusePath: 5 });
         }
         return;
     }
@@ -268,7 +396,7 @@ function collect$1(creep) {
     const storage = creep.room.storage;
     if (storage && storage.store[RESOURCE_ENERGY] >= 1000) {
         if (creep.withdraw(storage, RESOURCE_ENERGY) === ERR_NOT_IN_RANGE) {
-            creep.moveTo(storage, { reusePath: 5 });
+            moveTo(creep, storage, { reusePath: 5 });
         }
         return;
     }
@@ -278,14 +406,14 @@ function collect$1(creep) {
     });
     if (dropped) {
         if (creep.pickup(dropped) === ERR_NOT_IN_RANGE) {
-            creep.moveTo(dropped, { reusePath: 3 });
+            moveTo(creep, dropped, { reusePath: 3 });
         }
         return;
     }
     // 5. Direct harvest as last resort
     const source = creep.pos.findClosestByPath(FIND_SOURCES_ACTIVE);
     if (source && creep.harvest(source) === ERR_NOT_IN_RANGE) {
-        creep.moveTo(source, { reusePath: 5 });
+        moveTo(creep, source, { reusePath: 5 });
     }
 }
 function deliver$1(creep) {
@@ -307,7 +435,7 @@ function deliver$1(creep) {
     }
     if (target) {
         if (creep.transfer(target, RESOURCE_ENERGY) === ERR_NOT_IN_RANGE) {
-            creep.moveTo(target, { reusePath: 5 });
+            moveTo(creep, target, { reusePath: 5 });
         }
         return;
     }
@@ -316,7 +444,7 @@ function deliver$1(creep) {
     const hub = findHubContainer(creep.room);
     if (hub) {
         if (creep.transfer(hub, RESOURCE_ENERGY) === ERR_NOT_IN_RANGE) {
-            creep.moveTo(hub, { reusePath: 5 });
+            moveTo(creep, hub, { reusePath: 5 });
         }
     }
 }
@@ -334,18 +462,13 @@ function needsEnergy(s) {
     return false;
 }
 // ─── Container cache ──────────────────────────────────────────────────────────
-// Reuses the same container until it runs dry, then re-picks the fullest.
+// Reuses cached container until it runs dry OR another source container has
+// substantially more energy (3x threshold) — prevents all haulers from camping
+// one container while another source overflows.
 // Local collect: only containers adjacent to a source (range 1).
 // Prevents haulers from draining the controller container that upgraders need.
 function getCachedSourceContainer(creep) {
-    const cached = creep.memory.targetId
-        ? Game.getObjectById(creep.memory.targetId)
-        : null;
-    if (cached && cached.structureType === STRUCTURE_CONTAINER) {
-        const c = cached;
-        if (c.store[RESOURCE_ENERGY] >= 50 && isAdjacentToSource(c, creep.room))
-            return c;
-    }
+    var _a;
     const sources = creep.room.find(FIND_SOURCES);
     const candidates = [];
     for (const src of sources) {
@@ -359,12 +482,24 @@ function getCachedSourceContainer(creep) {
         creep.memory.targetId = undefined;
         return null;
     }
-    const best = candidates.reduce((a, b) => a.store[RESOURCE_ENERGY] >= b.store[RESOURCE_ENERGY] ? a : b);
+    const cached = creep.memory.targetId
+        ? Game.getObjectById(creep.memory.targetId)
+        : null;
+    if (cached && cached.structureType === STRUCTURE_CONTAINER) {
+        const c = cached;
+        if (c.store[RESOURCE_ENERGY] >= 50 && candidates.some(x => x.id === c.id)) {
+            // Invalidate if another container has 3x more energy — switch to the richer one
+            const richer = candidates.find(x => x.id !== c.id && x.store[RESOURCE_ENERGY] > c.store[RESOURCE_ENERGY] * 3);
+            if (!richer)
+                return c;
+        }
+    }
+    // Pick closest source container to this hauler's current position so
+    // multiple haulers naturally distribute across sources rather than all
+    // converging on whichever happened to be fullest at assignment time.
+    const best = (_a = creep.pos.findClosestByPath(candidates)) !== null && _a !== void 0 ? _a : candidates[0];
     creep.memory.targetId = best.id;
     return best;
-}
-function isAdjacentToSource(container, room) {
-    return room.find(FIND_SOURCES).some(src => src.pos.isNearTo(container.pos));
 }
 // Returns the non-source container closest to spawn — the hub buffer for builders.
 function findHubContainer(room) {
@@ -413,7 +548,7 @@ function moveToRoom$6(creep, roomName) {
     // Move toward room center — native pathfinder handles cross-room routing.
     // reusePath:20 caches the serialized path across ticks; range:23 stops as
     // soon as we're inside the room (within 23 tiles of center on a 50×50 grid).
-    creep.moveTo(new RoomPosition(25, 25, roomName), { reusePath: 20, range: 23 });
+    moveTo(creep, new RoomPosition(25, 25, roomName), { reusePath: 20, range: 23 });
 }
 
 // Dedicated controller upgrader.
@@ -427,7 +562,7 @@ function runUpgrader(creep) {
         const ctrl = creep.room.controller;
         if (ctrl && !ctrl.safeModeAvailable) {
             if (creep.generateSafeMode(ctrl) === ERR_NOT_IN_RANGE) {
-                creep.moveTo(ctrl, { reusePath: 5 });
+                moveTo(creep, ctrl, { reusePath: 5 });
             }
             return;
         }
@@ -438,7 +573,7 @@ function runUpgrader(creep) {
         const available = (_b = terminal.store.getUsedCapacity(RESOURCE_GHODIUM)) !== null && _b !== void 0 ? _b : 0;
         if (available >= 1000 && creep.store.getFreeCapacity() >= 1000) {
             if (creep.withdraw(terminal, RESOURCE_GHODIUM, 1000) === ERR_NOT_IN_RANGE) {
-                creep.moveTo(terminal, { reusePath: 5 });
+                moveTo(creep, terminal, { reusePath: 5 });
             }
             return;
         }
@@ -453,7 +588,7 @@ function runUpgrader(creep) {
     if (creep.memory.working) {
         const controller = creep.room.controller;
         if (controller && creep.upgradeController(controller) === ERR_NOT_IN_RANGE) {
-            creep.moveTo(controller, { reusePath: 5 });
+            moveTo(creep, controller, { reusePath: 5 });
         }
     }
     else {
@@ -472,7 +607,7 @@ function getEnergy$1(creep) {
     })[0];
     if (ctrlLink) {
         if (creep.withdraw(ctrlLink, RESOURCE_ENERGY) === ERR_NOT_IN_RANGE) {
-            creep.moveTo(ctrlLink, { reusePath: 5 });
+            moveTo(creep, ctrlLink, { reusePath: 5 });
         }
         return;
     }
@@ -483,20 +618,20 @@ function getEnergy$1(creep) {
     })[0];
     if (container) {
         if (creep.withdraw(container, RESOURCE_ENERGY) === ERR_NOT_IN_RANGE) {
-            creep.moveTo(container, { reusePath: 5 });
+            moveTo(creep, container, { reusePath: 5 });
         }
         return;
     }
     const storage = creep.room.storage;
     if (storage && storage.store[RESOURCE_ENERGY] > 0) {
         if (creep.withdraw(storage, RESOURCE_ENERGY) === ERR_NOT_IN_RANGE) {
-            creep.moveTo(storage, { reusePath: 5 });
+            moveTo(creep, storage, { reusePath: 5 });
         }
         return;
     }
     const source = creep.pos.findClosestByPath(FIND_SOURCES_ACTIVE);
     if (source && creep.harvest(source) === ERR_NOT_IN_RANGE) {
-        creep.moveTo(source, { reusePath: 5 });
+        moveTo(creep, source, { reusePath: 5 });
     }
 }
 
@@ -515,7 +650,7 @@ function runBuilder(creep) {
         const site = findBuildTarget(creep);
         if (site) {
             if (creep.build(site) === ERR_NOT_IN_RANGE) {
-                creep.moveTo(site, { reusePath: 5 });
+                moveTo(creep, site, { reusePath: 5 });
             }
             return;
         }
@@ -525,7 +660,7 @@ function runBuilder(creep) {
         });
         if (damagedRoad) {
             if (creep.repair(damagedRoad) === ERR_NOT_IN_RANGE) {
-                creep.moveTo(damagedRoad, { reusePath: 5 });
+                moveTo(creep, damagedRoad, { reusePath: 5 });
             }
             return;
         }
@@ -533,12 +668,21 @@ function runBuilder(creep) {
         const controller = creep.room.controller;
         if (controller) {
             if (creep.upgradeController(controller) === ERR_NOT_IN_RANGE) {
-                creep.moveTo(controller, { reusePath: 5 });
+                moveTo(creep, controller, { reusePath: 5 });
             }
         }
     }
     else {
         collectEnergy(creep);
+        // Eager transition: if collection just filled us, immediately start moving
+        // toward the build site instead of idling at the collection point for one tick.
+        if (creep.store.getFreeCapacity() === 0) {
+            creep.memory.working = true;
+            const site = findBuildTarget(creep);
+            if (site && creep.build(site) === ERR_NOT_IN_RANGE) {
+                moveTo(creep, site, { reusePath: 5 });
+            }
+        }
     }
 }
 function collectEnergy(creep) {
@@ -546,7 +690,7 @@ function collectEnergy(creep) {
     const storage = creep.room.storage;
     if (storage && storage.store[RESOURCE_ENERGY] >= 200) {
         if (creep.withdraw(storage, RESOURCE_ENERGY) === ERR_NOT_IN_RANGE) {
-            creep.moveTo(storage, { reusePath: 5 });
+            moveTo(creep, storage, { reusePath: 5 });
         }
         return;
     }
@@ -558,7 +702,7 @@ function collectEnergy(creep) {
     if (containers.length > 0) {
         const target = containers.reduce((a, b) => a.store[RESOURCE_ENERGY] >= b.store[RESOURCE_ENERGY] ? a : b);
         if (creep.withdraw(target, RESOURCE_ENERGY) === ERR_NOT_IN_RANGE) {
-            creep.moveTo(target, { reusePath: 5 });
+            moveTo(creep, target, { reusePath: 5 });
         }
         return;
     }
@@ -568,7 +712,7 @@ function collectEnergy(creep) {
     });
     if (dropped) {
         if (creep.pickup(dropped) === ERR_NOT_IN_RANGE) {
-            creep.moveTo(dropped, { reusePath: 3 });
+            moveTo(creep, dropped, { reusePath: 3 });
         }
         return;
     }
@@ -580,7 +724,7 @@ function collectEnergy(creep) {
     if (!hasContainers) {
         const source = creep.pos.findClosestByPath(FIND_SOURCES_ACTIVE);
         if (source && creep.harvest(source) === ERR_NOT_IN_RANGE) {
-            creep.moveTo(source, { reusePath: 5 });
+            moveTo(creep, source, { reusePath: 5 });
         }
     }
 }
@@ -639,17 +783,17 @@ function runRepairer(creep) {
                 filter: s => s.structureType === STRUCTURE_RAMPART,
             })[0];
             if (safeStand && !creep.pos.isEqualTo(target.pos)) {
-                creep.moveTo(target.pos, { reusePath: 3 });
+                moveTo(creep, target.pos, { reusePath: 3 });
             }
             if (creep.repair(target) === ERR_NOT_IN_RANGE) {
-                creep.moveTo(target, { reusePath: 3 });
+                moveTo(creep, target, { reusePath: 3 });
             }
         }
         else {
             // Nothing to repair — upgrade controller
             const ctrl = creep.room.controller;
             if (ctrl && creep.upgradeController(ctrl) === ERR_NOT_IN_RANGE) {
-                creep.moveTo(ctrl, { reusePath: 5 });
+                moveTo(creep, ctrl, { reusePath: 5 });
             }
         }
     }
@@ -684,20 +828,17 @@ function getEnergy(creep) {
     });
     if (container) {
         if (creep.withdraw(container, RESOURCE_ENERGY) === ERR_NOT_IN_RANGE) {
-            creep.moveTo(container, { reusePath: 5 });
+            moveTo(creep, container, { reusePath: 5 });
         }
         return;
     }
     const source = creep.pos.findClosestByPath(FIND_SOURCES_ACTIVE);
     if (source && creep.harvest(source) === ERR_NOT_IN_RANGE) {
-        creep.moveTo(source, { reusePath: 5 });
+        moveTo(creep, source, { reusePath: 5 });
     }
 }
 
 // Scout: patrols every room adjacent to any owned room.
-// Rooms bordering owned territory are rescanned every BORDER_STALE_TICKS (100)
-// for early-warning purposes. Other room types use the standard STALE_TICKS (500).
-// Clears targetRoomName when all rooms are fresh to prevent idle bouncing.
 const BORDER_STALE_TICKS = 100; // frequent rescan near our borders for early warning
 function runScout(creep) {
     const targetRoom = creep.memory.targetRoomName;
@@ -710,7 +851,7 @@ function runScout(creep) {
         if (exitDir !== ERR_NO_PATH && exitDir !== ERR_INVALID_ARGS) {
             const exit = creep.pos.findClosestByRange(exitDir);
             if (exit)
-                creep.moveTo(exit, { reusePath: 3 });
+                moveTo(creep, exit, { reusePath: 3 });
         }
         return;
     }
@@ -796,7 +937,7 @@ function assignNextTarget(creep) {
         if (exitDir !== ERR_NO_PATH && exitDir !== ERR_INVALID_ARGS) {
             const exit = creep.pos.findClosestByRange(exitDir);
             if (exit)
-                creep.moveTo(exit, { reusePath: 5 });
+                moveTo(creep, exit, { reusePath: 5 });
         }
     }
 }
@@ -812,7 +953,7 @@ function runClaimer(creep) {
         if (exitDir !== ERR_NO_PATH && exitDir !== ERR_INVALID_ARGS) {
             const exit = creep.pos.findClosestByRange(exitDir);
             if (exit)
-                creep.moveTo(exit, { reusePath: 3 });
+                moveTo(creep, exit, { reusePath: 3 });
         }
         return;
     }
@@ -829,12 +970,12 @@ function runClaimer(creep) {
     // If reserved by enemy, attack the reservation first
     if (controller.reservation && controller.reservation.username !== creep.owner.username) {
         if (creep.attackController(controller) === ERR_NOT_IN_RANGE) {
-            creep.moveTo(controller, { reusePath: 3 });
+            moveTo(creep, controller, { reusePath: 3 });
         }
         return;
     }
     if (creep.claimController(controller) === ERR_NOT_IN_RANGE) {
-        creep.moveTo(controller, { reusePath: 3 });
+        moveTo(creep, controller, { reusePath: 3 });
     }
 }
 
@@ -861,7 +1002,7 @@ function runReserver(creep) {
     // Reserving: each call with CLAIM+MOVE adds 600t to reservation (cap 5000t)
     const result = creep.reserveController(ctrl);
     if (result === ERR_NOT_IN_RANGE) {
-        creep.moveTo(ctrl, { reusePath: 10 });
+        moveTo(creep, ctrl, { reusePath: 10 });
     }
 }
 function moveToRoom$5(creep, roomName) {
@@ -869,7 +1010,7 @@ function moveToRoom$5(creep, roomName) {
     if (exitDir !== ERR_NO_PATH && exitDir !== ERR_INVALID_ARGS) {
         const exit = creep.pos.findClosestByRange(exitDir);
         if (exit)
-            creep.moveTo(exit, { reusePath: 5 });
+            moveTo(creep, exit, { reusePath: 5 });
     }
 }
 
@@ -899,7 +1040,7 @@ function loot(creep) {
     });
     if (tombstone) {
         if (creep.withdraw(tombstone, RESOURCE_ENERGY) === ERR_NOT_IN_RANGE) {
-            creep.moveTo(tombstone, { reusePath: 3 });
+            moveTo(creep, tombstone, { reusePath: 3 });
         }
         return;
     }
@@ -909,7 +1050,7 @@ function loot(creep) {
     });
     if (dropped) {
         if (creep.pickup(dropped) === ERR_NOT_IN_RANGE) {
-            creep.moveTo(dropped, { reusePath: 3 });
+            moveTo(creep, dropped, { reusePath: 3 });
         }
         return;
     }
@@ -926,7 +1067,7 @@ function loot(creep) {
         });
         if (remoteDropped) {
             if (creep.pickup(remoteDropped) === ERR_NOT_IN_RANGE) {
-                creep.moveTo(remoteDropped, { reusePath: 3 });
+                moveTo(creep, remoteDropped, { reusePath: 3 });
             }
             return;
         }
@@ -935,7 +1076,7 @@ function loot(creep) {
         });
         if (remoteTombstone) {
             if (creep.withdraw(remoteTombstone, RESOURCE_ENERGY) === ERR_NOT_IN_RANGE) {
-                creep.moveTo(remoteTombstone, { reusePath: 3 });
+                moveTo(creep, remoteTombstone, { reusePath: 3 });
             }
             return;
         }
@@ -950,7 +1091,7 @@ function loot(creep) {
     }
     const spawn = creep.pos.findClosestByPath(FIND_MY_SPAWNS);
     if (spawn)
-        creep.moveTo(spawn, { reusePath: 10 });
+        moveTo(creep, spawn, { reusePath: 10 });
 }
 function deposit(creep) {
     if (!isHome$3(creep)) {
@@ -961,7 +1102,7 @@ function deposit(creep) {
     const storage = creep.room.storage;
     if (storage && storage.store.getFreeCapacity(RESOURCE_ENERGY) > 0) {
         if (creep.transfer(storage, RESOURCE_ENERGY) === ERR_NOT_IN_RANGE) {
-            creep.moveTo(storage, { reusePath: 5 });
+            moveTo(creep, storage, { reusePath: 5 });
         }
         return;
     }
@@ -971,7 +1112,7 @@ function deposit(creep) {
     });
     if (container) {
         if (creep.transfer(container, RESOURCE_ENERGY) === ERR_NOT_IN_RANGE) {
-            creep.moveTo(container, { reusePath: 5 });
+            moveTo(creep, container, { reusePath: 5 });
         }
         return;
     }
@@ -981,7 +1122,7 @@ function deposit(creep) {
     });
     if (fillTarget) {
         if (creep.transfer(fillTarget, RESOURCE_ENERGY) === ERR_NOT_IN_RANGE) {
-            creep.moveTo(fillTarget, { reusePath: 5 });
+            moveTo(creep, fillTarget, { reusePath: 5 });
         }
     }
 }
@@ -1003,7 +1144,7 @@ function moveToRoom$4(creep, roomName) {
     if (exitDir !== ERR_NO_PATH && exitDir !== ERR_INVALID_ARGS) {
         const exit = creep.pos.findClosestByRange(exitDir);
         if (exit)
-            creep.moveTo(exit, { reusePath: 3 });
+            moveTo(creep, exit, { reusePath: 3 });
     }
 }
 
@@ -1039,7 +1180,7 @@ function collect(creep) {
     const storage = creep.room.storage;
     if (storage && storage.store[RESOURCE_ENERGY] >= 500) {
         if (creep.withdraw(storage, RESOURCE_ENERGY) === ERR_NOT_IN_RANGE) {
-            creep.moveTo(storage, { reusePath: 5 });
+            moveTo(creep, storage, { reusePath: 5 });
         }
         return;
     }
@@ -1049,13 +1190,13 @@ function collect(creep) {
     });
     if (container) {
         if (creep.withdraw(container, RESOURCE_ENERGY) === ERR_NOT_IN_RANGE) {
-            creep.moveTo(container, { reusePath: 5 });
+            moveTo(creep, container, { reusePath: 5 });
         }
         return;
     }
     // Source room has no energy to spare — idle near storage
     if (storage)
-        creep.moveTo(storage, { reusePath: 10 });
+        moveTo(creep, storage, { reusePath: 10 });
 }
 function deliver(creep) {
     const target = creep.memory.courierTarget;
@@ -1072,14 +1213,14 @@ function deliver(creep) {
     });
     if (spawnTarget) {
         if (creep.transfer(spawnTarget, RESOURCE_ENERGY) === ERR_NOT_IN_RANGE) {
-            creep.moveTo(spawnTarget, { reusePath: 5 });
+            moveTo(creep, spawnTarget, { reusePath: 5 });
         }
         return;
     }
     const destStorage = creep.room.storage;
     if (destStorage && destStorage.store.getFreeCapacity(RESOURCE_ENERGY) > 0) {
         if (creep.transfer(destStorage, RESOURCE_ENERGY) === ERR_NOT_IN_RANGE) {
-            creep.moveTo(destStorage, { reusePath: 5 });
+            moveTo(creep, destStorage, { reusePath: 5 });
         }
         return;
     }
@@ -1089,7 +1230,7 @@ function deliver(creep) {
     });
     if (container) {
         if (creep.transfer(container, RESOURCE_ENERGY) === ERR_NOT_IN_RANGE) {
-            creep.moveTo(container, { reusePath: 5 });
+            moveTo(creep, container, { reusePath: 5 });
         }
     }
 }
@@ -1098,7 +1239,7 @@ function moveToRoom$3(creep, roomName) {
     if (exitDir !== ERR_NO_PATH && exitDir !== ERR_INVALID_ARGS) {
         const exit = creep.pos.findClosestByRange(exitDir);
         if (exit)
-            creep.moveTo(exit, { reusePath: 3 });
+            moveTo(creep, exit, { reusePath: 3 });
     }
 }
 
@@ -1142,7 +1283,7 @@ function defendRoom$1(creep) {
     engageInRoom(creep);
 }
 function executeMarch$1(creep) {
-    var _a, _b;
+    var _a, _b, _c;
     const pid = creep.memory.platoonId;
     const homeMemory = creep.memory.homeRoom ? (_a = Game.rooms[creep.memory.homeRoom]) === null || _a === void 0 ? void 0 : _a.memory : undefined;
     const orders = pid ? (_b = homeMemory === null || homeMemory === void 0 ? void 0 : homeMemory.platoonOrders) === null || _b === void 0 ? void 0 : _b[pid] : undefined;
@@ -1168,10 +1309,16 @@ function executeMarch$1(creep) {
     // Standard: move to target room then engage
     if (targetRoom && creep.room.name !== targetRoom) {
         moveToRoom$2(creep, targetRoom);
+        return;
     }
-    else {
-        engageInRoom(creep);
+    // We're in the target room. If state is still MARCH the group hasn't fully
+    // assembled yet — hold at room center so we don't engage alone.
+    const currentState = (_c = homeMemory === null || homeMemory === void 0 ? void 0 : homeMemory.combatState) !== null && _c !== void 0 ? _c : 'RALLY';
+    if (currentState === 'MARCH') {
+        moveTo(creep, new RoomPosition(25, 25, creep.room.name), { reusePath: 5 });
+        return;
     }
+    engageInRoom(creep);
 }
 function rallyAtSpawn$1(creep) {
     if (!isHome$2(creep)) {
@@ -1183,9 +1330,9 @@ function rallyAtSpawn$1(creep) {
     const spawn = creep.pos.findClosestByPath(FIND_MY_SPAWNS);
     if (!spawn)
         return;
-    const target = stagingArea$2(creep.room, spawn);
-    if (creep.pos.getRangeTo(target) > 1) {
-        creep.moveTo(target, { reusePath: 5 });
+    const target = stagingSlot(creep.room, spawn, creep.name);
+    if (creep.pos.getRangeTo(target) > 0) {
+        moveTo(creep, target, { reusePath: 5 });
     }
 }
 function retreatToHome(creep) {
@@ -1194,8 +1341,11 @@ function retreatToHome(creep) {
         return;
     }
     const spawn = creep.pos.findClosestByPath(FIND_MY_SPAWNS);
-    if (spawn)
-        creep.moveTo(spawn, { reusePath: 3 });
+    if (!spawn)
+        return;
+    const target = stagingSlot(creep.room, spawn, creep.name);
+    if (creep.pos.getRangeTo(target) > 0)
+        moveTo(creep, target, { reusePath: 3 });
 }
 // ─── Yield & staging ─────────────────────────────────────────────────────────
 // Returns true if the creep was blocking an economic tile and moved away.
@@ -1213,18 +1363,29 @@ function yieldToEconomy$2(creep) {
         const dy = Math.sign(creep.pos.y - source.pos.y) || 1;
         const tx = Math.min(48, Math.max(1, creep.pos.x + dx * 3));
         const ty = Math.min(48, Math.max(1, creep.pos.y + dy * 3));
-        creep.moveTo(new RoomPosition(tx, ty, creep.room.name), { reusePath: 3 });
+        moveTo(creep, new RoomPosition(tx, ty, creep.room.name), { reusePath: 3 });
     }
     return true;
 }
-// Find a rally point near spawn that's at least 3 tiles from sources/containers.
-function stagingArea$2(room, spawn) {
+// djb2-style hash: maps a creep name to a stable slot index 0..count-1.
+// Different warriors get different slots → they spread across the staging ring.
+function nameSlot(name, count) {
+    let h = 5381;
+    for (let i = 0; i < name.length; i++)
+        h = ((h << 5) + h + name.charCodeAt(i)) & 0xffff;
+    return h % count;
+}
+// Collect all valid rally tiles in a ring around spawn (radius 4–8, away from
+// sources/containers), then assign this warrior a unique tile by name hash.
+// Minimum radius 4 (vs old 3) gives economy one extra tile of breathing room.
+function stagingSlot(room, spawn, creepName) {
     const sources = room.find(FIND_SOURCES);
     const containers = room.find(FIND_STRUCTURES, {
         filter: s => s.structureType === STRUCTURE_CONTAINER,
     });
     const terrain = room.getTerrain();
-    for (let r = 3; r <= 10; r++) {
+    const candidates = [];
+    for (let r = 4; r <= 8; r++) {
         for (let dx = -r; dx <= r; dx++) {
             for (let dy = -r; dy <= r; dy++) {
                 if (Math.abs(dx) !== r && Math.abs(dy) !== r)
@@ -1240,11 +1401,13 @@ function stagingArea$2(room, spawn) {
                     continue;
                 if (containers.some(c => pos.getRangeTo(c) < 2))
                     continue;
-                return pos;
+                candidates.push(pos);
             }
         }
     }
-    return spawn.pos; // fallback if room is very cramped
+    if (candidates.length === 0)
+        return spawn.pos;
+    return candidates[nameSlot(creepName, candidates.length)];
 }
 function isHome$2(creep) {
     var _a, _b;
@@ -1268,7 +1431,7 @@ function engageInRoom(creep) {
     const target = (_a = quadTarget) !== null && _a !== void 0 ? _a : findCombatTarget(creep);
     if (!target) {
         // Patrol center — there may be nothing left to attack
-        creep.moveTo(new RoomPosition(25, 25, creep.room.name), { reusePath: 10 });
+        moveTo(creep, new RoomPosition(25, 25, creep.room.name), { reusePath: 10 });
         return;
     }
     const range = creep.pos.getRangeTo(target);
@@ -1282,7 +1445,7 @@ function engageInRoom(creep) {
         creep.attack(target);
     }
     else {
-        creep.moveTo(target, { reusePath: 3 });
+        moveTo(creep, target, { reusePath: 3 });
     }
 }
 function findCombatTarget(creep) {
@@ -1307,7 +1470,7 @@ function moveToRoom$2(creep, roomName) {
     if (exitDir !== ERR_NO_PATH && exitDir !== ERR_INVALID_ARGS) {
         const exit = creep.pos.findClosestByRange(exitDir);
         if (exit)
-            creep.moveTo(exit, { reusePath: 3 });
+            moveTo(creep, exit, { reusePath: 3 });
     }
 }
 
@@ -1361,7 +1524,7 @@ function engage(creep) {
         : null;
     const target = (_a = quadTarget) !== null && _a !== void 0 ? _a : findTarget(creep);
     if (!target) {
-        creep.moveTo(new RoomPosition(25, 25, creep.room.name), { reusePath: 10 });
+        moveTo(creep, new RoomPosition(25, 25, creep.room.name), { reusePath: 10 });
         return;
     }
     const range = creep.pos.getRangeTo(target);
@@ -1370,7 +1533,7 @@ function engage(creep) {
     }
     if (range > KITE_RANGE) {
         // Close in
-        creep.moveTo(target, { reusePath: 3 });
+        moveTo(creep, target, { reusePath: 3 });
     }
     else if (range < 2) {
         // Kite away from melee enemies
@@ -1394,7 +1557,7 @@ function findTarget(creep) {
     return creep.pos.findClosestByPath(FIND_HOSTILE_STRUCTURES);
 }
 function executeMarch(creep) {
-    var _a, _b;
+    var _a, _b, _c;
     const pid = creep.memory.platoonId;
     const homeMemory = creep.memory.homeRoom ? (_a = Game.rooms[creep.memory.homeRoom]) === null || _a === void 0 ? void 0 : _a.memory : undefined;
     const orders = pid ? (_b = homeMemory === null || homeMemory === void 0 ? void 0 : homeMemory.platoonOrders) === null || _b === void 0 ? void 0 : _b[pid] : undefined;
@@ -1416,10 +1579,15 @@ function executeMarch(creep) {
     }
     if (targetRoom && creep.room.name !== targetRoom) {
         moveToRoom$1(creep, targetRoom);
+        return;
     }
-    else {
-        engage(creep);
+    // In the target room but group not fully assembled — hold at center.
+    const currentState = (_c = homeMemory === null || homeMemory === void 0 ? void 0 : homeMemory.combatState) !== null && _c !== void 0 ? _c : 'RALLY';
+    if (currentState === 'MARCH') {
+        moveTo(creep, new RoomPosition(25, 25, creep.room.name), { reusePath: 5 });
+        return;
     }
+    engage(creep);
 }
 function rally(creep) {
     if (!isHome$1(creep)) {
@@ -1433,7 +1601,7 @@ function rally(creep) {
         return;
     const target = stagingArea$1(creep.room, spawn);
     if (creep.pos.getRangeTo(target) > 1) {
-        creep.moveTo(target, { reusePath: 5 });
+        moveTo(creep, target, { reusePath: 5 });
     }
 }
 function retreat(creep) {
@@ -1443,7 +1611,7 @@ function retreat(creep) {
     }
     const spawn = creep.pos.findClosestByPath(FIND_MY_SPAWNS);
     if (spawn)
-        creep.moveTo(spawn, { reusePath: 3 });
+        moveTo(creep, spawn, { reusePath: 3 });
 }
 function yieldToEconomy$1(creep) {
     const adjacentSource = creep.pos.findInRange(FIND_SOURCES, 1).length > 0;
@@ -1455,7 +1623,7 @@ function yieldToEconomy$1(creep) {
     if (source) {
         const dx = Math.sign(creep.pos.x - source.pos.x) || 1;
         const dy = Math.sign(creep.pos.y - source.pos.y) || 1;
-        creep.moveTo(new RoomPosition(Math.min(48, Math.max(1, creep.pos.x + dx * 3)), Math.min(48, Math.max(1, creep.pos.y + dy * 3)), creep.room.name), { reusePath: 3 });
+        moveTo(creep, new RoomPosition(Math.min(48, Math.max(1, creep.pos.x + dx * 3)), Math.min(48, Math.max(1, creep.pos.y + dy * 3)), creep.room.name), { reusePath: 3 });
     }
     return true;
 }
@@ -1502,7 +1670,7 @@ function moveToRoom$1(creep, roomName) {
     if (exitDir !== ERR_NO_PATH && exitDir !== ERR_INVALID_ARGS) {
         const exit = creep.pos.findClosestByRange(exitDir);
         if (exit)
-            creep.moveTo(exit, { reusePath: 3 });
+            moveTo(creep, exit, { reusePath: 3 });
     }
 }
 function getDirection(dx, dy) {
@@ -1579,7 +1747,7 @@ function healPlatoon(creep) {
             filter: c => c.memory.role === 'warrior' || c.memory.role === 'ranger',
         });
     if (targets.length === 0) {
-        creep.moveTo(new RoomPosition(25, 25, creep.room.name), { reusePath: 10 });
+        moveTo(creep, new RoomPosition(25, 25, creep.room.name), { reusePath: 10 });
         return;
     }
     const wounded = targets.filter(c => c.hits < c.hitsMax * HEAL_THRESHOLD);
@@ -1592,10 +1760,10 @@ function healPlatoon(creep) {
     }
     else if (range <= 3) {
         creep.rangedHeal(healTarget);
-        creep.moveTo(healTarget, { reusePath: 2 });
+        moveTo(creep, healTarget, { reusePath: 2 });
     }
     else {
-        creep.moveTo(healTarget, { reusePath: 2 });
+        moveTo(creep, healTarget, { reusePath: 2 });
     }
 }
 function rallyAtSpawn(creep) {
@@ -1610,7 +1778,7 @@ function rallyAtSpawn(creep) {
         return;
     const target = stagingArea(creep.room, spawn);
     if (creep.pos.getRangeTo(target) > 1) {
-        creep.moveTo(target, { reusePath: 5 });
+        moveTo(creep, target, { reusePath: 5 });
     }
 }
 function yieldToEconomy(creep) {
@@ -1623,7 +1791,7 @@ function yieldToEconomy(creep) {
     if (source) {
         const dx = Math.sign(creep.pos.x - source.pos.x) || 1;
         const dy = Math.sign(creep.pos.y - source.pos.y) || 1;
-        creep.moveTo(new RoomPosition(Math.min(48, Math.max(1, creep.pos.x + dx * 3)), Math.min(48, Math.max(1, creep.pos.y + dy * 3)), creep.room.name), { reusePath: 3 });
+        moveTo(creep, new RoomPosition(Math.min(48, Math.max(1, creep.pos.x + dx * 3)), Math.min(48, Math.max(1, creep.pos.y + dy * 3)), creep.room.name), { reusePath: 3 });
     }
     return true;
 }
@@ -1670,7 +1838,7 @@ function moveToRoom(creep, roomName) {
     if (exitDir !== ERR_NO_PATH && exitDir !== ERR_INVALID_ARGS) {
         const exit = creep.pos.findClosestByRange(exitDir);
         if (exit)
-            creep.moveTo(exit, { reusePath: 3 });
+            moveTo(creep, exit, { reusePath: 3 });
     }
 }
 
@@ -1877,7 +2045,7 @@ function resetToEconomy(room) {
     room.memory.enemyRoomName = undefined;
     room.memory.enemyStrength = undefined;
     room.memory.scoutTick = undefined;
-    Memory.roadsPlanned = false;
+    room.memory.roadsPlanned = false;
 }
 
 // Dynamic body builder — scales creep bodies to the available energy budget.
@@ -2334,6 +2502,7 @@ function calcDynamicTargets(room) {
     const h = ((_j = room.memory.energyHistory) !== null && _j !== void 0 ? _j : []).slice(-8);
     const avgContainerFill = avgField(h, 'containerFillPct', 50);
     // ── Harvesters ────────────────────────────────────────────────────────────
+    // RC1: no harvesters — upgrader role handles mining+upgrading directly.
     // Bootstrap (no source containers yet): small mobile harvesters act as
     // combined harvester+hauler — up to 3 per source so cheap bodies cover
     // the supply gap while containers are being built.
@@ -2343,7 +2512,7 @@ function calcDynamicTargets(room) {
     const hasSourceContainers = sources.some(src => src.pos.findInRange(FIND_STRUCTURES, 1, {
         filter: s => s.structureType === STRUCTURE_CONTAINER,
     }).length > 0);
-    const harvester = hasSourceContainers
+    const harvester = rcl <= 1 ? 0 : hasSourceContainers
         ? sources.length
         : sources.reduce((sum, src) => sum + Math.min(walkableAround(src), 3), 0);
     // ── Haulers ───────────────────────────────────────────────────────────────
@@ -2389,17 +2558,26 @@ function calcDynamicTargets(room) {
     // ── Upgrader ──────────────────────────────────────────────────────────────
     // RC8: controller is maxed — no more leveling up. Spawn 1 maintenance upgrader
     // only when the downgrade timer is running low (< 50k of 200k ticks).
+    // RC1: upgrade-only mode (200 XP to RC2, 20k TTD). Upgraders fall through
+    // to FIND_SOURCES_ACTIVE in getEnergy() so they mine + upgrade without a
+    // container — no harvester or hauler needed at this level.
+    // RC2: 10k TTD is the shortest window of any level. Keep 1 upgrader alive
+    // even before a controller container exists so the 3k-tick emergency buffer
+    // never gets exercised.
     // All other levels: PID output drives count; high energy → more upgraders.
     let upgrader;
     if (rcl >= 8) {
         const ttd = (_l = (_k = room.controller) === null || _k === void 0 ? void 0 : _k.ticksToDowngrade) !== null && _l !== void 0 ? _l : 200000;
         upgrader = upgraderHasLocalEnergy && ttd < 50000 ? 1 : 0;
     }
+    else if (rcl <= 1) {
+        upgrader = 3;
+    }
     else {
         const pidOutput = (_o = (_m = room.memory.pidState) === null || _m === void 0 ? void 0 : _m.output) !== null && _o !== void 0 ? _o : DEFAULT_PID_CONFIG.outputMid;
         upgrader = upgraderHasLocalEnergy
             ? Math.max(0, Math.min(4, Math.round(pidOutput)))
-            : 0;
+            : (rcl <= 2 ? 1 : 0);
     }
     const repairer = 0; // phase override in spawnManager handles DEFEND
     const scout = rcl >= 1 ? 1 : 0;
@@ -2472,7 +2650,7 @@ const SPAWN_FLOOR = 200;
 // Combat targets per phase — these OVERLAY the dynamic economy targets
 const COMBAT_TARGETS = {
     ECONOMY: { warrior: 0, ranger: 0, healer: 0, repairer: 0 },
-    ASSESS: { warrior: 2, ranger: 1, healer: 0, repairer: 0 }, // pre-stage a raid party while scouting
+    ASSESS: { warrior: 4, ranger: 2, healer: 0, repairer: 0 }, // minimum for 1 full quad (2W+2R) during assessment
     RUSH: { warrior: 8, ranger: 4, healer: 2, repairer: 0 }, // was warrior:6 ranger:2
     DEFEND: { warrior: 4, ranger: 2, healer: 2, repairer: 2 },
 };
@@ -2690,13 +2868,15 @@ function pruneExcessCreeps(room) {
             }
         }
     }
-    // Emergency energy: suicide most-expensive non-essential creeps
+    // Emergency energy: suicide the largest upgrader only.
+    // Scouts are excluded — a [MOVE] body costs nothing to maintain (no CPU overhead,
+    // no energy drain) and losing scout coverage means losing remote-room intel.
     if ((status === null || status === void 0 ? void 0 : status.level) === 'CRITICAL') {
         const expensive = creeps
-            .filter(c => c.memory.role === 'upgrader' || c.memory.role === 'scout')
+            .filter(c => c.memory.role === 'upgrader')
             .sort((a, b) => (b.body.length) - (a.body.length));
         if (expensive.length > 0) {
-            console.log(`[adaptive] CRITICAL energy — retiring ${expensive[0].memory.role}`);
+            console.log(`[adaptive] CRITICAL energy — retiring upgrader`);
             expensive[0].suicide();
         }
     }
@@ -2846,14 +3026,18 @@ function manageConstruction(room) {
     // Containers and storage are checked periodically — they can be destroyed
     // mid-game and must be re-queued without waiting for an RCL change.
     // Keys are room-scoped so multi-room setups don't share the same timer.
-    if (period(50, `construction:containers:${room.name}`))
+    // Strategy report §RC1: no construction at RC1 — wasted effort. Containers
+    // are placed starting at RC2 when the harvester/hauler split begins.
+    if (rcl >= 2 && period(50, `construction:containers:${room.name}`))
         placeContainers(room);
     if (rcl >= 4 && period(50, `construction:storage:${room.name}`))
         placeStorage(room);
-    if (Memory.roadsPlanned && Memory.lastRCL === rcl)
+    // Per-room flags so multi-room setups don't fight over a single global value.
+    // Each room independently detects its own RCL change and re-plans once.
+    if (room.memory.roadsPlanned && room.memory.lastRCL === rcl)
         return;
-    Memory.roadsPlanned = true;
-    Memory.lastRCL = rcl;
+    room.memory.roadsPlanned = true;
+    room.memory.lastRCL = rcl;
     if (rcl >= 2)
         placeExtensions(room, rcl);
     if (rcl >= 2)
@@ -2864,6 +3048,10 @@ function manageConstruction(room) {
         placeLinks(room, rcl);
     if (rcl >= 6)
         placeTerminal(room);
+    if (rcl >= 6)
+        placeExtractor(room);
+    if (rcl >= 7)
+        placeAdditionalSpawns(room, rcl);
     console.log(`[adaptive] Construction planned at RCL ${rcl}`);
 }
 // ─── New room bootstrap ───────────────────────────────────────────────────────
@@ -3186,6 +3374,46 @@ function placeTerminal(room) {
         }
     }
 }
+// ─── Extractor (RCL 6+) ──────────────────────────────────────────────────────
+function placeExtractor(room) {
+    const mineral = room.find(FIND_MINERALS)[0];
+    if (!mineral)
+        return;
+    const hasExtractor = mineral.pos.lookFor(LOOK_STRUCTURES).some(s => s.structureType === STRUCTURE_EXTRACTOR) ||
+        mineral.pos.lookFor(LOOK_CONSTRUCTION_SITES).some(s => s.structureType === STRUCTURE_EXTRACTOR);
+    if (!hasExtractor) {
+        room.createConstructionSite(mineral.pos.x, mineral.pos.y, STRUCTURE_EXTRACTOR);
+        console.log(`[adaptive] Extractor site placed at mineral (${mineral.pos.x},${mineral.pos.y})`);
+    }
+}
+// ─── Additional spawns (RCL 7+) ──────────────────────────────────────────────
+// Strategy report §RC7: "Build second spawn immediately — removes spawn bottleneck."
+function placeAdditionalSpawns(room, rcl) {
+    var _a;
+    const built = room.find(FIND_MY_STRUCTURES, { filter: s => s.structureType === STRUCTURE_SPAWN }).length;
+    const pending = room.find(FIND_MY_CONSTRUCTION_SITES, { filter: s => s.structureType === STRUCTURE_SPAWN }).length;
+    const allowed = (_a = CONTROLLER_STRUCTURES[STRUCTURE_SPAWN][rcl]) !== null && _a !== void 0 ? _a : 1;
+    if (built + pending >= allowed)
+        return;
+    const ref = room.find(FIND_MY_SPAWNS)[0];
+    if (!ref)
+        return;
+    for (let r = 2; r <= 8; r++) {
+        for (let dx = -r; dx <= r; dx++) {
+            for (let dy = -r; dy <= r; dy++) {
+                if (Math.abs(dx) !== r && Math.abs(dy) !== r)
+                    continue;
+                const x = ref.pos.x + dx, y = ref.pos.y + dy;
+                if (x < 2 || x > 47 || y < 2 || y > 47)
+                    continue;
+                if (room.createConstructionSite(x, y, STRUCTURE_SPAWN) === OK) {
+                    console.log(`[adaptive] Spawn ${built + pending + 1} site placed at (${x},${y})`);
+                    return;
+                }
+            }
+        }
+    }
+}
 // ─── Ramparts ────────────────────────────────────────────────────────────────
 function placeRamparts(room) {
     const toProtect = [
@@ -3410,7 +3638,7 @@ function threatScore$1(c) {
     }, 0);
 }
 
-const MIN_FIGHTERS_TO_MARCH = 3;
+const MIN_FIGHTERS_TO_MARCH = 4;
 const MIN_HEALERS_TO_MARCH = 1;
 const RAID_STRENGTH_MAX = 15; // raid without healer if enemy this weak
 const REASSESS_INTERVAL = 500;
@@ -3521,13 +3749,26 @@ function manageTowers(room) {
         }
         return;
     }
-    // No hostiles, no damaged creeps: repair the highest-priority rampart.
+    // Priority 3 (strategy report §Military): repair highest-priority rampart.
     const fortifyTarget = getFortifyTarget(room);
     if (fortifyTarget) {
         for (const tower of towers) {
             if (tower.store[RESOURCE_ENERGY] < TOWER_ENERGY_COST)
                 continue;
             tower.repair(fortifyTarget);
+        }
+        return;
+    }
+    // Priority 4: repair damaged roads (< 50% hits) when tower tanks are healthy.
+    // Only when energy > 700 — keep reserves high in case hostiles appear next tick.
+    const damagedRoad = room.find(FIND_STRUCTURES, {
+        filter: s => s.structureType === STRUCTURE_ROAD && s.hits < s.hitsMax * 0.5,
+    })[0];
+    if (damagedRoad) {
+        for (const tower of towers) {
+            if (tower.store[RESOURCE_ENERGY] < 700)
+                continue;
+            tower.repair(damagedRoad);
         }
     }
 }
@@ -3606,7 +3847,10 @@ function manageCombatState(room) {
                 break;
             }
             const inEnemyRoom = fighters.filter(c => c.room.name === enemyRoom);
-            if (inEnemyRoom.length > 0) {
+            // Wait until ALL remaining fighters are in the enemy room so the group
+            // enters together. "All" is capped at fighters.length so a death en route
+            // doesn't permanently stall the march.
+            if (inEnemyRoom.length > 0 && inEnemyRoom.length >= fighters.length) {
                 room.memory.combatState = 'ENGAGE';
                 console.log(`[${room.name}] Combat → ENGAGE`);
             }
@@ -4042,8 +4286,53 @@ function bestHaulerCarry(energyCap) {
     return units * 100; // each CC unit = 100e capacity
 }
 
+// Observer manager (RC8+): rotates observer.observeRoom() through known rooms each
+// tick to keep Memory.roomIntel fresh without spending scout creep CPU.
+// Picks the least-recently-scanned room each tick, so intel ages evenly.
+// Writes the same RoomIntel fields that scout.ts populates.
+function manageObserver(room) {
+    var _a, _b, _c, _d, _e, _f, _g;
+    if (((_b = (_a = room.controller) === null || _a === void 0 ? void 0 : _a.level) !== null && _b !== void 0 ? _b : 0) < 8)
+        return;
+    const observer = room.find(FIND_MY_STRUCTURES, {
+        filter: s => s.structureType === STRUCTURE_OBSERVER,
+    })[0];
+    if (!observer)
+        return;
+    const known = Object.keys((_c = Memory.roomIntel) !== null && _c !== void 0 ? _c : {});
+    if (known.length === 0)
+        return;
+    // Pick the room scanned least recently so all intel ages evenly
+    const target = known.reduce((oldest, name) => {
+        var _a, _b, _c, _d;
+        const a = (_b = (_a = Memory.roomIntel[oldest]) === null || _a === void 0 ? void 0 : _a.scannedAt) !== null && _b !== void 0 ? _b : 0;
+        const b = (_d = (_c = Memory.roomIntel[name]) === null || _c === void 0 ? void 0 : _c.scannedAt) !== null && _d !== void 0 ? _d : 0;
+        return b < a ? name : oldest;
+    });
+    if (observer.observeRoom(target) !== OK)
+        return;
+    // Room is visible this tick — update the intel record
+    const r = Game.rooms[target];
+    if (!r)
+        return;
+    const existing = (_d = Memory.roomIntel[target]) !== null && _d !== void 0 ? _d : {};
+    const hostileCreeps = r.find(FIND_HOSTILE_CREEPS);
+    const hostileStructures = r.find(FIND_HOSTILE_STRUCTURES);
+    Memory.roomIntel[target] = {
+        ...existing,
+        scannedAt: Game.time,
+        hasController: !!r.controller,
+        controllerOwned: !!((_f = (_e = r.controller) === null || _e === void 0 ? void 0 : _e.owner) === null || _f === void 0 ? void 0 : _f.username),
+        sourceCount: r.find(FIND_SOURCES).length,
+        enemyCreeps: hostileCreeps.length,
+        enemySpawns: hostileStructures.filter(s => s.structureType === STRUCTURE_SPAWN).length,
+        enemyTowers: hostileStructures.filter(s => s.structureType === STRUCTURE_TOWER).length,
+        strength: (_g = existing.strength) !== null && _g !== void 0 ? _g : 0,
+    };
+}
+
 // Updated automatically by `just deploy` — do not edit manually
-const REGIME = '2026-06-03-9b3fec9';
+const REGIME = '2026-06-03-ee3e78a';
 
 const REPORT_INTERVAL = 50;
 const LOG_INTERVAL = 200;
@@ -4249,6 +4538,8 @@ function loop() {
             manageTransfers(room);
         if (!cpuCritical)
             manageRemote(room);
+        if (!cpuCritical)
+            manageObserver(room);
         reportStats(room);
     }
     // Run creep roles

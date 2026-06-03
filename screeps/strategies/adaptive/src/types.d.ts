@@ -90,6 +90,9 @@ declare global {
             reservedUntil: number;      // tick when reservation expires (used to decide reserver respawn)
         }>;
         sourceDistances?: Record<string, number>; // sourceId → path distance to storage (cached)
+        // Construction planning — per-room so multi-room setups don't clobber each other
+        roadsPlanned?: boolean;
+        lastRCL?: number;
         // PID controller state — drives upgrader count based on total room energy vs setpoint
         pidState?: {
             integral:  number;  // accumulated error × dt
@@ -123,9 +126,6 @@ declare global {
     interface Memory {
         // Shared global intel — written by scout.ts, read by all rooms
         roomIntel: Record<string, RoomIntel>;
-        // Construction planning — global since construction sites are room-scoped
-        roadsPlanned?: boolean;
-        lastRCL?: number;
         // Per-room threat registry — key is the name of OUR room being threatened
         roomThreats?: Record<string, RoomThreat>;
         // Expansion (one expansion campaign at a time, global FSM)

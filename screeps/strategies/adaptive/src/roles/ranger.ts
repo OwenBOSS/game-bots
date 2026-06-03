@@ -1,6 +1,8 @@
 // Ranged attacker: stays at 3-tile range, kites melee enemies, uses rangedMassAttack
 // when multiple enemies cluster. Shares rally/march/engage state with warriors.
 
+import { moveTo as smartMove } from '../utils/trafficManager';
+
 const RETREAT_HP = 0.25;
 const KITE_RANGE = 3; // ideal engagement distance
 
@@ -53,7 +55,7 @@ function engage(creep: Creep): void {
         : null;
     const target = (quadTarget as Creep | AnyOwnedStructure | null) ?? findTarget(creep);
     if (!target) {
-        creep.moveTo(new RoomPosition(25, 25, creep.room.name), { reusePath: 10 });
+        smartMove(creep,new RoomPosition(25, 25, creep.room.name), { reusePath: 10 });
         return;
     }
 
@@ -65,7 +67,7 @@ function engage(creep: Creep): void {
 
     if (range > KITE_RANGE) {
         // Close in
-        creep.moveTo(target, { reusePath: 3 });
+        smartMove(creep,target, { reusePath: 3 });
     } else if (range < 2) {
         // Kite away from melee enemies
         const dx = creep.pos.x - (target as Creep).pos.x;
@@ -111,9 +113,17 @@ function executeMarch(creep: Creep): void {
     }
     if (targetRoom && creep.room.name !== targetRoom) {
         moveToRoom(creep, targetRoom);
-    } else {
-        engage(creep);
+        return;
     }
+
+    // In the target room but group not fully assembled — hold at center.
+    const currentState = homeMemory?.combatState ?? 'RALLY';
+    if (currentState === 'MARCH') {
+        smartMove(creep, new RoomPosition(25, 25, creep.room.name), { reusePath: 5 });
+        return;
+    }
+
+    engage(creep);
 }
 
 function rally(creep: Creep): void {
@@ -124,14 +134,14 @@ function rally(creep: Creep): void {
     if (!spawn) return;
     const target = stagingArea(creep.room, spawn);
     if (creep.pos.getRangeTo(target) > 1) {
-        creep.moveTo(target, { reusePath: 5 });
+        smartMove(creep,target, { reusePath: 5 });
     }
 }
 
 function retreat(creep: Creep): void {
     if (!isHome(creep)) { travelHome(creep); return; }
     const spawn = creep.pos.findClosestByPath(FIND_MY_SPAWNS);
-    if (spawn) creep.moveTo(spawn, { reusePath: 3 });
+    if (spawn) smartMove(creep,spawn, { reusePath: 3 });
 }
 
 function yieldToEconomy(creep: Creep): boolean {
@@ -143,7 +153,7 @@ function yieldToEconomy(creep: Creep): boolean {
     if (source) {
         const dx = Math.sign(creep.pos.x - source.pos.x) || 1;
         const dy = Math.sign(creep.pos.y - source.pos.y) || 1;
-        creep.moveTo(new RoomPosition(
+        smartMove(creep,new RoomPosition(
             Math.min(48, Math.max(1, creep.pos.x + dx * 3)),
             Math.min(48, Math.max(1, creep.pos.y + dy * 3)),
             creep.room.name,
@@ -189,7 +199,7 @@ function moveToRoom(creep: Creep, roomName: string): void {
     const exitDir = creep.room.findExitTo(roomName);
     if (exitDir !== ERR_NO_PATH && exitDir !== ERR_INVALID_ARGS) {
         const exit = creep.pos.findClosestByRange(exitDir);
-        if (exit) creep.moveTo(exit, { reusePath: 3 });
+        if (exit) smartMove(creep,exit, { reusePath: 3 });
     }
 }
 

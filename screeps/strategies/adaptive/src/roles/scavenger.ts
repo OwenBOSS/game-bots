@@ -1,4 +1,6 @@
 // Scavenger: fast creep that collects dropped energy and tombstones.
+
+import { moveTo } from '../utils/trafficManager';
 // Works in own room first; if a scavengeRoom is set and own room is clear,
 // crosses into that room to loot (safe-mode rooms included — can enter, just can't attack).
 // Returns home and deposits into storage, containers, or spawns.
@@ -27,7 +29,7 @@ function loot(creep: Creep): void {
     });
     if (tombstone) {
         if (creep.withdraw(tombstone, RESOURCE_ENERGY) === ERR_NOT_IN_RANGE) {
-            creep.moveTo(tombstone, { reusePath: 3 });
+            moveTo(creep,tombstone, { reusePath: 3 });
         }
         return;
     }
@@ -38,7 +40,7 @@ function loot(creep: Creep): void {
     });
     if (dropped) {
         if (creep.pickup(dropped) === ERR_NOT_IN_RANGE) {
-            creep.moveTo(dropped, { reusePath: 3 });
+            moveTo(creep,dropped, { reusePath: 3 });
         }
         return;
     }
@@ -57,7 +59,7 @@ function loot(creep: Creep): void {
         });
         if (remoteDropped) {
             if (creep.pickup(remoteDropped) === ERR_NOT_IN_RANGE) {
-                creep.moveTo(remoteDropped, { reusePath: 3 });
+                moveTo(creep,remoteDropped, { reusePath: 3 });
             }
             return;
         }
@@ -66,7 +68,7 @@ function loot(creep: Creep): void {
         });
         if (remoteTombstone) {
             if (creep.withdraw(remoteTombstone, RESOURCE_ENERGY) === ERR_NOT_IN_RANGE) {
-                creep.moveTo(remoteTombstone, { reusePath: 3 });
+                moveTo(creep,remoteTombstone, { reusePath: 3 });
             }
             return;
         }
@@ -78,7 +80,7 @@ function loot(creep: Creep): void {
     // 5. Nothing to loot anywhere — idle near spawn
     if (!isHome(creep)) { travelHome(creep); return; }
     const spawn = creep.pos.findClosestByPath(FIND_MY_SPAWNS);
-    if (spawn) creep.moveTo(spawn, { reusePath: 10 });
+    if (spawn) moveTo(creep,spawn, { reusePath: 10 });
 }
 
 function deposit(creep: Creep): void {
@@ -88,7 +90,7 @@ function deposit(creep: Creep): void {
     const storage = creep.room.storage;
     if (storage && storage.store.getFreeCapacity(RESOURCE_ENERGY) > 0) {
         if (creep.transfer(storage, RESOURCE_ENERGY) === ERR_NOT_IN_RANGE) {
-            creep.moveTo(storage, { reusePath: 5 });
+            moveTo(creep,storage, { reusePath: 5 });
         }
         return;
     }
@@ -99,7 +101,7 @@ function deposit(creep: Creep): void {
     }) as StructureContainer | null;
     if (container) {
         if (creep.transfer(container, RESOURCE_ENERGY) === ERR_NOT_IN_RANGE) {
-            creep.moveTo(container, { reusePath: 5 });
+            moveTo(creep,container, { reusePath: 5 });
         }
         return;
     }
@@ -111,7 +113,7 @@ function deposit(creep: Creep): void {
     });
     if (fillTarget) {
         if (creep.transfer(fillTarget, RESOURCE_ENERGY) === ERR_NOT_IN_RANGE) {
-            creep.moveTo(fillTarget, { reusePath: 5 });
+            moveTo(creep,fillTarget, { reusePath: 5 });
         }
     }
 }
@@ -132,6 +134,6 @@ function moveToRoom(creep: Creep, roomName: string): void {
     const exitDir = creep.room.findExitTo(roomName);
     if (exitDir !== ERR_NO_PATH && exitDir !== ERR_INVALID_ARGS) {
         const exit = creep.pos.findClosestByRange(exitDir);
-        if (exit) creep.moveTo(exit, { reusePath: 3 });
+        if (exit) moveTo(creep,exit, { reusePath: 3 });
     }
 }

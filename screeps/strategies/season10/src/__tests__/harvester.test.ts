@@ -54,12 +54,14 @@ function makeHarvesterCreep(opts: {
     const cap    = opts.cap    ?? 200;
     const source = makeSource();
     return {
+        name: 'harvester1',
         memory: { role: 'harvester', working: opts.working ?? false, sourceId: 'src1' },
         store: {
             [(global as any).RESOURCE_ENERGY]: energy,
             getFreeCapacity: () => cap - energy,
         },
         room: {
+            name: 'W1N1',
             find: vi.fn((type: number) => {
                 if (type === (global as any).FIND_SOURCES) return [source];
                 if (type === (global as any).FIND_MY_CREEPS) return [];
@@ -70,6 +72,7 @@ function makeHarvesterCreep(opts: {
         pos: {
             isEqualTo: vi.fn(() => opts.atContainerPos ?? false),
             findClosestByPath: vi.fn(() => null),
+            getRangeTo: vi.fn(() => 0),
         },
         harvest:           vi.fn(() => 0),
         transfer:          vi.fn(() => 0),

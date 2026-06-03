@@ -72,12 +72,20 @@ export function makeRoom(opts: {
     myCreeps?: any[];
     mySpawns?: any[];
     hostileCreeps?: any[];
+    structures?: any[];
+    myStructures?: any[];
+    sources?: any[];
+    constructionSites?: any[];
     memory?: any;
 } = {}): any {
-    const scores = opts.scores ?? [];
-    const myCreeps = opts.myCreeps ?? [];
-    const mySpawns = opts.mySpawns ?? [];
-    const hostileCreeps = opts.hostileCreeps ?? [];
+    const scores           = opts.scores           ?? [];
+    const myCreeps         = opts.myCreeps         ?? [];
+    const mySpawns         = opts.mySpawns         ?? [];
+    const hostileCreeps    = opts.hostileCreeps     ?? [];
+    const structures       = opts.structures        ?? [];
+    const myStructures     = opts.myStructures      ?? [];
+    const sources          = opts.sources           ?? [];
+    const constructionSites = opts.constructionSites ?? [];
 
     const room: any = {
         name: opts.name ?? 'W1N1',
@@ -87,11 +95,15 @@ export function makeRoom(opts: {
         memory: opts.memory ?? {},
         find: vi.fn((type: number, findOpts?: { filter?: (obj: any) => boolean }) => {
             let results: any[];
-            if (type === (global as any).FIND_SCORES)           results = scores;
-            else if (type === (global as any).FIND_MY_CREEPS)   results = myCreeps;
-            else if (type === (global as any).FIND_MY_SPAWNS)   results = mySpawns;
-            else if (type === (global as any).FIND_HOSTILE_CREEPS) results = hostileCreeps;
-            else                                                 results = [];
+            if      (type === (global as any).FIND_SCORES)            results = scores;
+            else if (type === (global as any).FIND_MY_CREEPS)         results = myCreeps;
+            else if (type === (global as any).FIND_MY_SPAWNS)         results = mySpawns;
+            else if (type === (global as any).FIND_HOSTILE_CREEPS)    results = hostileCreeps;
+            else if (type === (global as any).FIND_STRUCTURES)        results = structures;
+            else if (type === (global as any).FIND_MY_STRUCTURES)     results = myStructures;
+            else if (type === (global as any).FIND_SOURCES)           results = sources;
+            else if (type === (global as any).FIND_CONSTRUCTION_SITES) results = constructionSites;
+            else                                                       results = [];
             return findOpts?.filter ? results.filter(findOpts.filter) : results;
         }),
     };

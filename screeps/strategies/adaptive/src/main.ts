@@ -22,6 +22,7 @@ import { manageLinkTransfers } from './managers/linkManager';
 import { manageMarket }       from './managers/marketManager';
 import { manageTransfers }    from './managers/transferManager';
 import { manageRemote }       from './managers/remoteManager';
+import { manageObserver }     from './managers/observerManager';
 import { reportStats }        from './managers/statsReporter';
 
 export function loop(): void {
@@ -58,6 +59,7 @@ export function loop(): void {
         if (!cpuConstrained) manageMarket(room);
         if (!cpuCritical)    manageTransfers(room);
         if (!cpuCritical)    manageRemote(room);
+        if (!cpuCritical)    manageObserver(room);
         reportStats(room);
     }
 

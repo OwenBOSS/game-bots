@@ -4,6 +4,8 @@
 // Remote mode (creep.memory.remoteRoom set): travels to the remote room and
 // mines there. Energy drops into the remote container for remote haulers to collect.
 
+import { moveTo } from '../utils/trafficManager';
+
 export function runHarvester(creep: Creep): void {
     // Remote mode: mine in a reserved room — remote haulers carry energy home
     if (creep.memory.remoteRoom) {
@@ -41,7 +43,7 @@ function runRemote(creep: Creep): void {
     if (container) {
         // Park on container and mine into it — remote hauler will collect
         if (!creep.pos.isEqualTo(container.pos)) {
-            creep.moveTo(container.pos, { reusePath: 10 });
+            moveTo(creep, container.pos, { reusePath: 10 });
             return;
         }
         creep.harvest(source);
@@ -51,7 +53,7 @@ function runRemote(creep: Creep): void {
     } else {
         // No container yet — mine and drop on ground (remote hauler picks up dropped)
         if (creep.harvest(source) === ERR_NOT_IN_RANGE) {
-            creep.moveTo(source, { reusePath: 5 });
+            moveTo(creep, source, { reusePath: 5 });
         }
     }
 }
@@ -60,7 +62,7 @@ function runRemote(creep: Creep): void {
 
 function runStationary(creep: Creep, source: Source, container: StructureContainer): void {
     if (!creep.pos.isEqualTo(container.pos)) {
-        creep.moveTo(container.pos, { reusePath: 10, visualizePathStyle: undefined });
+        moveTo(creep, container.pos, { reusePath: 10, visualizePathStyle: undefined });
         return;
     }
     creep.harvest(source);
@@ -93,17 +95,17 @@ function runMobile(creep: Creep, source: Source): void {
         const target = findDeliveryTarget(creep);
         if (target) {
             if (creep.transfer(target, RESOURCE_ENERGY) === ERR_NOT_IN_RANGE) {
-                creep.moveTo(target, { reusePath: 5 });
+                moveTo(creep, target, { reusePath: 5 });
             }
         } else {
             const controller = creep.room.controller;
             if (controller && creep.upgradeController(controller) === ERR_NOT_IN_RANGE) {
-                creep.moveTo(controller, { reusePath: 5 });
+                moveTo(creep, controller, { reusePath: 5 });
             }
         }
     } else {
         if (creep.harvest(source) === ERR_NOT_IN_RANGE) {
-            creep.moveTo(source, { reusePath: 5 });
+            moveTo(creep, source, { reusePath: 5 });
         }
     }
 }
@@ -111,16 +113,31 @@ function runMobile(creep: Creep, source: Source): void {
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
 function getAssignedSource(creep: Creep): Source | null {
-    if (creep.memory.sourceId) {
-        return Game.getObjectById(creep.memory.sourceId);
-    }
     const sources = creep.room.find(FIND_SOURCES);
-    const counts  = new Map<Id<Source>, number>();
+    if (sources.length === 0) return null;
+
+    const counts = new Map<Id<Source>, number>();
     for (const c of creep.room.find(FIND_MY_CREEPS)) {
         if (c.memory.role === 'harvester' && c.memory.sourceId) {
             counts.set(c.memory.sourceId, (counts.get(c.memory.sourceId) ?? 0) + 1);
         }
     }
+
+    if (creep.memory.sourceId) {
+        const currentLoad = counts.get(creep.memory.sourceId) ?? 0;
+        // Rebalance: if our source has 2+ more harvesters than another, switch
+        const underloaded = sources.find(s =>
+            s.id !== creep.memory.sourceId &&
+            (counts.get(s.id) ?? 0) < currentLoad - 1
+        );
+        if (underloaded) {
+            creep.memory.sourceId = underloaded.id;
+            return underloaded;
+        }
+        return Game.getObjectById(creep.memory.sourceId);
+    }
+
+    // First assignment: least-contested source
     const best = sources.reduce((a, b) =>
         (counts.get(a.id) ?? 0) <= (counts.get(b.id) ?? 0) ? a : b
     );
@@ -155,5 +172,5 @@ function findDeliveryTarget(creep: Creep): AnyOwnedStructure | null {
 }
 
 function moveToRoom(creep: Creep, roomName: string): void {
-    creep.moveTo(new RoomPosition(25, 25, roomName), { reusePath: 20, range: 23 });
+    moveTo(creep, new RoomPosition(25, 25, roomName), { reusePath: 20, range: 23 });
 }

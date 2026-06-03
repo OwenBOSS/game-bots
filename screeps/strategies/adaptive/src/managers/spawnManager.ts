@@ -16,7 +16,7 @@ const SPAWN_FLOOR = 200;
 // Combat targets per phase — these OVERLAY the dynamic economy targets
 const COMBAT_TARGETS: Record<GamePhase, { warrior: number; ranger: number; healer: number; repairer: number }> = {
     ECONOMY: { warrior: 0, ranger: 0, healer: 0, repairer: 0 },
-    ASSESS:  { warrior: 2, ranger: 1, healer: 0, repairer: 0 },  // pre-stage a raid party while scouting
+    ASSESS:  { warrior: 4, ranger: 2, healer: 0, repairer: 0 },  // minimum for 1 full quad (2W+2R) during assessment
     RUSH:    { warrior: 8, ranger: 4, healer: 2, repairer: 0 },  // was warrior:6 ranger:2
     DEFEND:  { warrior: 4, ranger: 2, healer: 2, repairer: 2 },
 };
@@ -228,13 +228,15 @@ export function pruneExcessCreeps(room: Room): void {
         }
     }
 
-    // Emergency energy: suicide most-expensive non-essential creeps
+    // Emergency energy: suicide the largest upgrader only.
+    // Scouts are excluded — a [MOVE] body costs nothing to maintain (no CPU overhead,
+    // no energy drain) and losing scout coverage means losing remote-room intel.
     if (status?.level === 'CRITICAL') {
         const expensive = creeps
-            .filter(c => c.memory.role === 'upgrader' || c.memory.role === 'scout')
+            .filter(c => c.memory.role === 'upgrader')
             .sort((a, b) => (b.body.length) - (a.body.length));
         if (expensive.length > 0) {
-            console.log(`[adaptive] CRITICAL energy — retiring ${expensive[0].memory.role}`);
+            console.log(`[adaptive] CRITICAL energy — retiring upgrader`);
             expensive[0].suicide();
         }
     }

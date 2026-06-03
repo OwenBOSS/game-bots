@@ -16,7 +16,8 @@ describe('calcDynamicTargets', () => {
         it('scales with source count under BALANCED bottleneck', () => {
             const src1 = makeSource({ id: 'src1', x: 10, y: 10, walkableTiles: 8 });
             const src2 = makeSource({ id: 'src2', x: 40, y: 10, walkableTiles: 8 });
-            const room = makeRoom({ sources: [src1, src2], memory: { energyStatus: { bottleneck: 'BALANCED' } } });
+            const ctrl = makeController({ level: 2 });
+            const room = makeRoom({ controller: ctrl, sources: [src1, src2], memory: { energyStatus: { bottleneck: 'BALANCED' } } });
             const t = calcDynamicTargets(room);
             expect(t.harvester).toBeGreaterThanOrEqual(2);
         });
@@ -26,7 +27,8 @@ describe('calcDynamicTargets', () => {
             const c2 = makeContainer();
             const src1 = makeSource({ id: 'src1', nearbyContainers: [c1] });
             const src2 = makeSource({ id: 'src2', nearbyContainers: [c2] });
-            const room = makeRoom({ sources: [src1, src2], containers: [c1, c2] });
+            const ctrl = makeController({ level: 2 });
+            const room = makeRoom({ controller: ctrl, sources: [src1, src2], containers: [c1, c2] });
             expect(calcDynamicTargets(room).harvester).toBe(2);
         });
     });
@@ -111,15 +113,15 @@ describe('calcDynamicTargets', () => {
     });
 
     describe('upgrader', () => {
-        it('returns 0 when no controller container and energy is critical', () => {
-            const ctrl = makeController({ nearContainer: false });
+        it('returns 0 when no controller container and energy is critical (RC3+)', () => {
+            const ctrl = makeController({ level: 3, nearContainer: false });
             const room = makeRoom({ controller: ctrl, memory: { energyStatus: { level: 'CRITICAL' } } });
             expect(calcDynamicTargets(room).upgrader).toBe(0);
         });
 
-        it('returns 0 when no controller container regardless of pidOutput', () => {
-            const ctrl = makeController({ nearContainer: false });
-            // Even with high PID output, no controller container → 0 upgraders
+        it('returns 0 when no controller container regardless of pidOutput (RC3+)', () => {
+            const ctrl = makeController({ level: 3, nearContainer: false });
+            // Even with high PID output, no controller container → 0 upgraders at RC3+
             const room = makeRoom({
                 controller: ctrl,
                 memory: { pidState: { output: 4, integral: 2, lastError: 0.5, lastTick: 990 } },
@@ -168,6 +170,48 @@ describe('calcDynamicTargets', () => {
                 memory: { pidState: { output: 4, integral: 3, lastError: 1, lastTick: 990 } },
             });
             expect(calcDynamicTargets(room).upgrader).toBe(0);
+        });
+    });
+
+    describe('RC1 bootstrap mode', () => {
+        it('returns 3 upgraders at RC1', () => {
+            const ctrl = makeController({ level: 1 });
+            const src  = makeSource({ id: 'src1' });
+            const room = makeRoom({ controller: ctrl, sources: [src] });
+            expect(calcDynamicTargets(room).upgrader).toBe(3);
+        });
+
+        it('returns 0 harvesters at RC1 (upgraders act as upgrader-harvesters)', () => {
+            const ctrl = makeController({ level: 1 });
+            const src  = makeSource({ id: 'src1' });
+            const room = makeRoom({ controller: ctrl, sources: [src] });
+            expect(calcDynamicTargets(room).harvester).toBe(0);
+        });
+
+        it('returns 0 haulers and 0 builders at RC1', () => {
+            const ctrl = makeController({ level: 1 });
+            const src  = makeSource({ id: 'src1' });
+            const room = makeRoom({ controller: ctrl, sources: [src] });
+            const t = calcDynamicTargets(room);
+            expect(t.hauler).toBe(0);
+            expect(t.builder).toBe(0);
+        });
+    });
+
+    describe('RC2 minimum upgrader', () => {
+        it('returns 1 upgrader at RC2 even without controller container or link', () => {
+            const ctrl = makeController({ level: 2, nearContainer: false });
+            const room = makeRoom({ controller: ctrl, memory: {} });
+            expect(calcDynamicTargets(room).upgrader).toBe(1);
+        });
+
+        it('uses PID output at RC2 once controller container exists', () => {
+            const ctrl = makeController({ level: 2, nearContainer: true });
+            const room = makeRoom({
+                controller: ctrl,
+                memory: { pidState: { output: 3, integral: 1, lastError: 0, lastTick: 990 } },
+            });
+            expect(calcDynamicTargets(room).upgrader).toBe(3);
         });
     });
 
@@ -437,8 +481,8 @@ describe('calcDynamicTargets upgrader (PID-driven)', () => {
         );
     });
 
-    it('returns 0 upgraders when no controller container regardless of pidOutput', () => {
-        const ctrl = makeController({ nearContainer: false });
+    it('returns 0 upgraders when no controller container regardless of pidOutput (RC3+)', () => {
+        const ctrl = makeController({ level: 3, nearContainer: false });
         const room = makeRoom({
             controller: ctrl,
             memory: { pidState: { output: 4, integral: 2, lastError: 0.5, lastTick: 990 } },

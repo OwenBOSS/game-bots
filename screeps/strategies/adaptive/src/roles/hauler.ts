@@ -8,6 +8,8 @@
 // CPU optimisation: target IDs are cached in creep.memory.targetId so
 // findClosestByPath is only called when the cached target is gone or empty.
 
+import { moveTo } from '../utils/trafficManager';
+
 export function runHauler(creep: Creep): void {
     if (creep.memory.working && creep.store[RESOURCE_ENERGY] === 0) {
         creep.memory.working = false;
@@ -20,6 +22,17 @@ export function runHauler(creep: Creep): void {
         creep.memory.working ? deliverRemote(creep) : collectRemote(creep);
     } else {
         creep.memory.working ? deliver(creep) : collect(creep);
+        // Eager transition: skip the idle tick when a phase just completed.
+        // Without this, the working-state flip only fires at the top of the NEXT tick,
+        // leaving the creep standing at spawn/container for one wasted tick — the primary
+        // cause of spawn-area pile-ups when multiple haulers finish simultaneously.
+        if (creep.memory.working && creep.store[RESOURCE_ENERGY] === 0) {
+            creep.memory.working = false;
+            collect(creep);
+        } else if (!creep.memory.working && creep.store.getFreeCapacity() === 0) {
+            creep.memory.working = true;
+            deliver(creep);
+        }
     }
 }
 
@@ -38,7 +51,7 @@ function collectRemote(creep: Creep): void {
         filter: t => t.store[RESOURCE_ENERGY] >= 50,
     });
     if (tomb) {
-        if (creep.withdraw(tomb, RESOURCE_ENERGY) === ERR_NOT_IN_RANGE) creep.moveTo(tomb, { reusePath: 3 });
+        if (creep.withdraw(tomb, RESOURCE_ENERGY) === ERR_NOT_IN_RANGE) moveTo(creep, tomb, { reusePath: 3 });
         return;
     }
 
@@ -46,7 +59,7 @@ function collectRemote(creep: Creep): void {
     const container = getCachedContainer(creep, remote);
     if (container) {
         if (creep.withdraw(container, RESOURCE_ENERGY) === ERR_NOT_IN_RANGE) {
-            creep.moveTo(container, { reusePath: 5 });
+            moveTo(creep, container, { reusePath: 5 });
         }
         return;
     }
@@ -56,7 +69,7 @@ function collectRemote(creep: Creep): void {
         filter: r => r.resourceType === RESOURCE_ENERGY && r.amount >= 50,
     });
     if (dropped) {
-        if (creep.pickup(dropped) === ERR_NOT_IN_RANGE) creep.moveTo(dropped, { reusePath: 3 });
+        if (creep.pickup(dropped) === ERR_NOT_IN_RANGE) moveTo(creep, dropped, { reusePath: 3 });
         return;
     }
 
@@ -78,7 +91,7 @@ function deliverRemote(creep: Creep): void {
     const storage = creep.room.storage;
     if (storage && storage.store.getFreeCapacity(RESOURCE_ENERGY) > 0) {
         if (creep.transfer(storage, RESOURCE_ENERGY) === ERR_NOT_IN_RANGE) {
-            creep.moveTo(storage, { reusePath: 5 });
+            moveTo(creep, storage, { reusePath: 5 });
         }
         return;
     }
@@ -90,7 +103,7 @@ function deliverRemote(creep: Creep): void {
             s.store.getFreeCapacity(RESOURCE_ENERGY) > 0,
     });
     if (spawn) {
-        if (creep.transfer(spawn, RESOURCE_ENERGY) === ERR_NOT_IN_RANGE) creep.moveTo(spawn, { reusePath: 5 });
+        if (creep.transfer(spawn, RESOURCE_ENERGY) === ERR_NOT_IN_RANGE) moveTo(creep, spawn, { reusePath: 5 });
     }
 }
 
@@ -111,7 +124,7 @@ function collect(creep: Creep): void {
     }) as StructureLink | null;
     if (link) {
         if (creep.withdraw(link, RESOURCE_ENERGY) === ERR_NOT_IN_RANGE) {
-            creep.moveTo(link, { reusePath: 5 });
+            moveTo(creep, link, { reusePath: 5 });
         }
         return;
     }
@@ -120,7 +133,7 @@ function collect(creep: Creep): void {
     const container = getCachedSourceContainer(creep);
     if (container) {
         if (creep.withdraw(container, RESOURCE_ENERGY) === ERR_NOT_IN_RANGE) {
-            creep.moveTo(container, { reusePath: 5 });
+            moveTo(creep, container, { reusePath: 5 });
         }
         return;
     }
@@ -129,7 +142,7 @@ function collect(creep: Creep): void {
     const storage = creep.room.storage;
     if (storage && storage.store[RESOURCE_ENERGY] >= 1000) {
         if (creep.withdraw(storage, RESOURCE_ENERGY) === ERR_NOT_IN_RANGE) {
-            creep.moveTo(storage, { reusePath: 5 });
+            moveTo(creep, storage, { reusePath: 5 });
         }
         return;
     }
@@ -140,7 +153,7 @@ function collect(creep: Creep): void {
     });
     if (dropped) {
         if (creep.pickup(dropped) === ERR_NOT_IN_RANGE) {
-            creep.moveTo(dropped, { reusePath: 3 });
+            moveTo(creep, dropped, { reusePath: 3 });
         }
         return;
     }
@@ -148,7 +161,7 @@ function collect(creep: Creep): void {
     // 5. Direct harvest as last resort
     const source = creep.pos.findClosestByPath(FIND_SOURCES_ACTIVE);
     if (source && creep.harvest(source) === ERR_NOT_IN_RANGE) {
-        creep.moveTo(source, { reusePath: 5 });
+        moveTo(creep, source, { reusePath: 5 });
     }
 }
 
@@ -172,7 +185,7 @@ function deliver(creep: Creep): void {
 
     if (target) {
         if (creep.transfer(target as any, RESOURCE_ENERGY) === ERR_NOT_IN_RANGE) {
-            creep.moveTo(target, { reusePath: 5 });
+            moveTo(creep, target, { reusePath: 5 });
         }
         return;
     }
@@ -182,7 +195,7 @@ function deliver(creep: Creep): void {
     const hub = findHubContainer(creep.room);
     if (hub) {
         if (creep.transfer(hub, RESOURCE_ENERGY) === ERR_NOT_IN_RANGE) {
-            creep.moveTo(hub, { reusePath: 5 });
+            moveTo(creep, hub, { reusePath: 5 });
         }
     }
 }
@@ -197,20 +210,13 @@ function needsEnergy(s: AnyStructure | null): boolean {
 }
 
 // ─── Container cache ──────────────────────────────────────────────────────────
-// Reuses the same container until it runs dry, then re-picks the fullest.
+// Reuses cached container until it runs dry OR another source container has
+// substantially more energy (3x threshold) — prevents all haulers from camping
+// one container while another source overflows.
 
 // Local collect: only containers adjacent to a source (range 1).
 // Prevents haulers from draining the controller container that upgraders need.
 function getCachedSourceContainer(creep: Creep): StructureContainer | null {
-    const cached = creep.memory.targetId
-        ? Game.getObjectById(creep.memory.targetId as Id<StructureContainer>)
-        : null;
-
-    if (cached && (cached as StructureContainer).structureType === STRUCTURE_CONTAINER) {
-        const c = cached as StructureContainer;
-        if (c.store[RESOURCE_ENERGY] >= 50 && isAdjacentToSource(c, creep.room)) return c;
-    }
-
     const sources = creep.room.find(FIND_SOURCES);
     const candidates: StructureContainer[] = [];
     for (const src of sources) {
@@ -226,9 +232,23 @@ function getCachedSourceContainer(creep: Creep): StructureContainer | null {
         return null;
     }
 
-    const best = candidates.reduce((a, b) =>
-        a.store[RESOURCE_ENERGY] >= b.store[RESOURCE_ENERGY] ? a : b
-    );
+    const cached = creep.memory.targetId
+        ? Game.getObjectById(creep.memory.targetId as Id<StructureContainer>)
+        : null;
+
+    if (cached && (cached as StructureContainer).structureType === STRUCTURE_CONTAINER) {
+        const c = cached as StructureContainer;
+        if (c.store[RESOURCE_ENERGY] >= 50 && candidates.some(x => x.id === c.id)) {
+            // Invalidate if another container has 3x more energy — switch to the richer one
+            const richer = candidates.find(x => x.id !== c.id && x.store[RESOURCE_ENERGY] > c.store[RESOURCE_ENERGY] * 3);
+            if (!richer) return c;
+        }
+    }
+
+    // Pick closest source container to this hauler's current position so
+    // multiple haulers naturally distribute across sources rather than all
+    // converging on whichever happened to be fullest at assignment time.
+    const best = creep.pos.findClosestByPath(candidates) ?? candidates[0];
     creep.memory.targetId = best.id as string;
     return best;
 }
@@ -290,5 +310,5 @@ function moveToRoom(creep: Creep, roomName: string): void {
     // Move toward room center — native pathfinder handles cross-room routing.
     // reusePath:20 caches the serialized path across ticks; range:23 stops as
     // soon as we're inside the room (within 23 tiles of center on a 50×50 grid).
-    creep.moveTo(new RoomPosition(25, 25, roomName), { reusePath: 20, range: 23 });
+    moveTo(creep, new RoomPosition(25, 25, roomName), { reusePath: 20, range: 23 });
 }

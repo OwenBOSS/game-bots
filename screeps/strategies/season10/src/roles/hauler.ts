@@ -1,11 +1,24 @@
 // Hauler: collects energy from source containers and delivers to spawn/extensions/towers.
 // Falls back to upgrading the controller when everything is full — this keeps RC progressing.
 
+import { moveTo } from '../utils/trafficManager';
+
 export function runHauler(creep: Creep): void {
     if (creep.memory.working && creep.store[RESOURCE_ENERGY] === 0) creep.memory.working = false;
     if (!creep.memory.working && creep.store.getFreeCapacity() === 0) creep.memory.working = true;
 
     creep.memory.working ? deliver(creep) : collect(creep);
+
+    // Eager transition: skip the idle tick when a phase just completed.
+    // Without this, the working-state flip only fires at the top of the NEXT tick,
+    // leaving the creep standing at spawn/container for one wasted tick.
+    if (creep.memory.working && creep.store[RESOURCE_ENERGY] === 0) {
+        creep.memory.working = false;
+        collect(creep);
+    } else if (!creep.memory.working && creep.store.getFreeCapacity() === 0) {
+        creep.memory.working = true;
+        deliver(creep);
+    }
 }
 
 function collect(creep: Creep): void {
@@ -13,7 +26,7 @@ function collect(creep: Creep): void {
     const container = getBestSourceContainer(creep.room);
     if (container) {
         if (creep.withdraw(container, RESOURCE_ENERGY) === ERR_NOT_IN_RANGE) {
-            creep.moveTo(container, { reusePath: 5 });
+            moveTo(creep, container, { reusePath: 5 });
         }
         return;
     }
@@ -23,13 +36,13 @@ function collect(creep: Creep): void {
         filter: (r: Resource) => r.resourceType === RESOURCE_ENERGY && r.amount >= 50,
     });
     if (dropped) {
-        if (creep.pickup(dropped) === ERR_NOT_IN_RANGE) creep.moveTo(dropped, { reusePath: 3 });
+        if (creep.pickup(dropped) === ERR_NOT_IN_RANGE) moveTo(creep, dropped, { reusePath: 3 });
         return;
     }
 
     // Nothing ready — wait near spawn rather than wandering
     const spawn = creep.room.find(FIND_MY_SPAWNS)[0];
-    if (spawn) creep.moveTo(spawn, { reusePath: 20, range: 3 });
+    if (spawn) moveTo(creep, spawn, { reusePath: 20, range: 3 });
 }
 
 function deliver(creep: Creep): void {
@@ -47,7 +60,7 @@ function deliver(creep: Creep): void {
     });
     if (urgent) {
         if (creep.transfer(urgent as any, RESOURCE_ENERGY) === ERR_NOT_IN_RANGE) {
-            creep.moveTo(urgent, { reusePath: 5 });
+            moveTo(creep, urgent, { reusePath: 5 });
         }
         return;
     }
@@ -56,7 +69,7 @@ function deliver(creep: Creep): void {
     const storage = creep.room.storage;
     if (storage && storage.store.getFreeCapacity(RESOURCE_ENERGY) > 0) {
         if (creep.transfer(storage, RESOURCE_ENERGY) === ERR_NOT_IN_RANGE) {
-            creep.moveTo(storage, { reusePath: 5 });
+            moveTo(creep, storage, { reusePath: 5 });
         }
         return;
     }
@@ -64,7 +77,7 @@ function deliver(creep: Creep): void {
     // Priority 3: upgrade controller to keep RC progressing
     const ctrl = creep.room.controller;
     if (ctrl && creep.upgradeController(ctrl) === ERR_NOT_IN_RANGE) {
-        creep.moveTo(ctrl, { reusePath: 5 });
+        moveTo(creep, ctrl, { reusePath: 5 });
     }
 }
 

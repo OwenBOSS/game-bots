@@ -214,5 +214,5 @@ function resetToEconomy(room: Room): void {
     room.memory.enemyRoomName = undefined;
     room.memory.enemyStrength = undefined;
     room.memory.scoutTick     = undefined;
-    Memory.roadsPlanned       = false;
+    room.memory.roadsPlanned  = false;
 }

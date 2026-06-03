@@ -1,6 +1,8 @@
 // Raid-responder: keeps ramparts and walls above minimum HP during DEFEND phase.
 // Withdraws energy from containers; falls back to harvesting.
 
+import { moveTo } from '../utils/trafficManager';
+
 const RAMPART_MIN_HITS = 50_000;
 const WALL_MIN_HITS    = 10_000;
 
@@ -20,16 +22,16 @@ export function runRepairer(creep: Creep): void {
                 filter: s => s.structureType === STRUCTURE_RAMPART,
             })[0];
             if (safeStand && !creep.pos.isEqualTo(target.pos)) {
-                creep.moveTo(target.pos, { reusePath: 3 });
+                moveTo(creep,target.pos, { reusePath: 3 });
             }
             if (creep.repair(target) === ERR_NOT_IN_RANGE) {
-                creep.moveTo(target, { reusePath: 3 });
+                moveTo(creep,target, { reusePath: 3 });
             }
         } else {
             // Nothing to repair — upgrade controller
             const ctrl = creep.room.controller;
             if (ctrl && creep.upgradeController(ctrl) === ERR_NOT_IN_RANGE) {
-                creep.moveTo(ctrl, { reusePath: 5 });
+                moveTo(creep,ctrl, { reusePath: 5 });
             }
         }
     } else {
@@ -70,13 +72,13 @@ function getEnergy(creep: Creep): void {
 
     if (container) {
         if (creep.withdraw(container, RESOURCE_ENERGY) === ERR_NOT_IN_RANGE) {
-            creep.moveTo(container, { reusePath: 5 });
+            moveTo(creep,container, { reusePath: 5 });
         }
         return;
     }
 
     const source = creep.pos.findClosestByPath(FIND_SOURCES_ACTIVE);
     if (source && creep.harvest(source) === ERR_NOT_IN_RANGE) {
-        creep.moveTo(source, { reusePath: 5 });
+        moveTo(creep,source, { reusePath: 5 });
     }
 }

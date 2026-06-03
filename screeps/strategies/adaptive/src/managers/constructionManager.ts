@@ -17,18 +17,24 @@ export function manageConstruction(room: Room): void {
     // Containers and storage are checked periodically — they can be destroyed
     // mid-game and must be re-queued without waiting for an RCL change.
     // Keys are room-scoped so multi-room setups don't share the same timer.
-    if (period(50, `construction:containers:${room.name}`)) placeContainers(room);
+    // Strategy report §RC1: no construction at RC1 — wasted effort. Containers
+    // are placed starting at RC2 when the harvester/hauler split begins.
+    if (rcl >= 2 && period(50, `construction:containers:${room.name}`)) placeContainers(room);
     if (rcl >= 4 && period(50, `construction:storage:${room.name}`)) placeStorage(room);
 
-    if (Memory.roadsPlanned && Memory.lastRCL === rcl) return;
-    Memory.roadsPlanned = true;
-    Memory.lastRCL = rcl;
+    // Per-room flags so multi-room setups don't fight over a single global value.
+    // Each room independently detects its own RCL change and re-plans once.
+    if (room.memory.roadsPlanned && room.memory.lastRCL === rcl) return;
+    room.memory.roadsPlanned = true;
+    room.memory.lastRCL = rcl;
 
     if (rcl >= 2) placeExtensions(room, rcl);
     if (rcl >= 2) placeRamparts(room);
     if (rcl >= 3) placeTowers(room, rcl);
     if (rcl >= 5) placeLinks(room, rcl);
     if (rcl >= 6) placeTerminal(room);
+    if (rcl >= 6) placeExtractor(room);
+    if (rcl >= 7) placeAdditionalSpawns(room, rcl);
 
     console.log(`[adaptive] Construction planned at RCL ${rcl}`);
 }
@@ -332,6 +338,45 @@ function placeTerminal(room: Room): void {
                 const x = spawn.pos.x + dx, y = spawn.pos.y + dy;
                 if (x < 2 || x > 47 || y < 2 || y > 47) continue;
                 if (room.createConstructionSite(x, y, STRUCTURE_TERMINAL) === OK) return;
+            }
+        }
+    }
+}
+
+// ─── Extractor (RCL 6+) ──────────────────────────────────────────────────────
+
+function placeExtractor(room: Room): void {
+    const mineral = room.find(FIND_MINERALS)[0];
+    if (!mineral) return;
+    const hasExtractor =
+        mineral.pos.lookFor(LOOK_STRUCTURES).some(s => s.structureType === STRUCTURE_EXTRACTOR) ||
+        mineral.pos.lookFor(LOOK_CONSTRUCTION_SITES).some(s => s.structureType === STRUCTURE_EXTRACTOR);
+    if (!hasExtractor) {
+        room.createConstructionSite(mineral.pos.x, mineral.pos.y, STRUCTURE_EXTRACTOR);
+        console.log(`[adaptive] Extractor site placed at mineral (${mineral.pos.x},${mineral.pos.y})`);
+    }
+}
+
+// ─── Additional spawns (RCL 7+) ──────────────────────────────────────────────
+// Strategy report §RC7: "Build second spawn immediately — removes spawn bottleneck."
+
+function placeAdditionalSpawns(room: Room, rcl: number): void {
+    const built   = room.find(FIND_MY_STRUCTURES, { filter: s => s.structureType === STRUCTURE_SPAWN }).length;
+    const pending = room.find(FIND_MY_CONSTRUCTION_SITES, { filter: s => s.structureType === STRUCTURE_SPAWN }).length;
+    const allowed = (CONTROLLER_STRUCTURES[STRUCTURE_SPAWN] as Record<number, number>)[rcl] ?? 1;
+    if (built + pending >= allowed) return;
+    const ref = room.find(FIND_MY_SPAWNS)[0];
+    if (!ref) return;
+    for (let r = 2; r <= 8; r++) {
+        for (let dx = -r; dx <= r; dx++) {
+            for (let dy = -r; dy <= r; dy++) {
+                if (Math.abs(dx) !== r && Math.abs(dy) !== r) continue;
+                const x = ref.pos.x + dx, y = ref.pos.y + dy;
+                if (x < 2 || x > 47 || y < 2 || y > 47) continue;
+                if (room.createConstructionSite(x, y, STRUCTURE_SPAWN) === OK) {
+                    console.log(`[adaptive] Spawn ${built + pending + 1} site placed at (${x},${y})`);
+                    return;
+                }
             }
         }
     }

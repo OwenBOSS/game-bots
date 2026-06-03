@@ -493,6 +493,76 @@ function buildTargetList() {
     return all.filter(r => !(r in Game.rooms));
 }
 
+// Screeps direction offset tables — indices 1–8 match the direction constants
+// TOP=1, TOP_RIGHT=2, RIGHT=3, BOTTOM_RIGHT=4, BOTTOM=5, BOTTOM_LEFT=6, LEFT=7, TOP_LEFT=8
+const DIR_DX = [0, 0, 1, 1, 1, 0, -1, -1, -1];
+const DIR_DY = [0, -1, -1, 0, 1, 1, 1, 0, -1];
+// Track which creeps have already been issued a move command via moveTo this tick.
+// shoveBlocker uses this to decide whether to shove a blocker:
+//  - Not yet moved this tick → idle or will move after us → safe to shove (last move() wins)
+//  - Already moved this tick → has a pending direction → skip shove; Screeps' native
+//    swap mechanic handles two creeps moving into each other's tiles in the same tick.
+let _movedTick = -1;
+const _movedSet = new Set();
+function markMoved(name) {
+    if (Game.time !== _movedTick) {
+        _movedTick = Game.time;
+        _movedSet.clear();
+    }
+    _movedSet.add(name);
+}
+function hasMoved(name) {
+    return Game.time === _movedTick && _movedSet.has(name);
+}
+/**
+ * Drop-in replacement for creep.moveTo() with traffic management.
+ *
+ * Two improvements over vanilla moveTo:
+ *  1. ignoreCreeps:true — pathfinder picks the geometrically shortest path
+ *     instead of routing around creep clusters, which is the primary cause of
+ *     spawn-area jams.
+ *  2. Shove — if a friendly idle creep occupies the tile directly between us
+ *     and our target, we push it in that same direction this tick so it yields
+ *     the tile before the engine resolves movement.
+ */
+function moveTo(creep, target, opts = {}) {
+    var _a;
+    markMoved(creep.name);
+    const result = creep.moveTo(target, {
+        reusePath: 3,
+        ignoreCreeps: true,
+        ...opts,
+    });
+    const targetPos = 'pos' in target
+        ? target.pos
+        : target;
+    const range = (_a = opts.range) !== null && _a !== void 0 ? _a : 1;
+    if (creep.room.name === targetPos.roomName && creep.pos.getRangeTo(targetPos) > range) {
+        shoveBlocker(creep, targetPos);
+    }
+    return result;
+}
+function shoveBlocker(creep, targetPos) {
+    const dir = creep.pos.getDirectionTo(targetPos);
+    const nx = creep.pos.x + DIR_DX[dir];
+    const ny = creep.pos.y + DIR_DY[dir];
+    if (nx < 1 || nx > 48 || ny < 1 || ny > 48)
+        return;
+    const blocker = new RoomPosition(nx, ny, creep.room.name)
+        .lookFor(LOOK_CREEPS)
+        .find(c => c.my && c.name !== creep.name);
+    if (!blocker || blocker.fatigue > 0)
+        return;
+    // Skip creeps that have already issued a move command this tick via our moveTo wrapper.
+    // Their direction is committed; shoving them would be overridden by their own move anyway,
+    // and in a head-on corridor Screeps' native swap mechanic resolves it without help.
+    // Creeps that haven't called moveTo yet (truly idle: just delivered, parked at container,
+    // waiting at controller) haven't committed a direction and are safe to displace.
+    if (hasMoved(blocker.name))
+        return;
+    blocker.move(dir);
+}
+
 // Stationary harvester: parks on the container adjacent to its assigned source and mines
 // continuously. Falls back to mobile delivery when no container exists yet.
 function runHarvester(creep) {
@@ -509,7 +579,7 @@ function runHarvester(creep) {
 }
 function runStationary(creep, source, container) {
     if (!creep.pos.isEqualTo(container.pos)) {
-        creep.moveTo(container.pos, { reusePath: 10 });
+        moveTo(creep, container.pos, { reusePath: 10 });
         return;
     }
     creep.harvest(source);
@@ -529,36 +599,43 @@ function runMobile(creep, source) {
         });
         if (target) {
             if (creep.transfer(target, RESOURCE_ENERGY) === ERR_NOT_IN_RANGE) {
-                creep.moveTo(target, { reusePath: 5 });
+                moveTo(creep, target, { reusePath: 5 });
             }
         }
         else {
             // Spawn/extensions full — dump into controller to keep progressing
             const ctrl = creep.room.controller;
             if (ctrl && creep.upgradeController(ctrl) === ERR_NOT_IN_RANGE) {
-                creep.moveTo(ctrl, { reusePath: 5 });
+                moveTo(creep, ctrl, { reusePath: 5 });
             }
         }
     }
     else {
         if (creep.harvest(source) === ERR_NOT_IN_RANGE) {
-            creep.moveTo(source, { reusePath: 5 });
+            moveTo(creep, source, { reusePath: 5 });
         }
     }
 }
 function getAssignedSource(creep) {
-    var _a;
-    if (creep.memory.sourceId) {
-        return Game.getObjectById(creep.memory.sourceId);
-    }
+    var _a, _b;
     const sources = creep.room.find(FIND_SOURCES);
     if (sources.length === 0)
         return null;
+    // Count existing assignments, excluding this creep to get a fair comparison
     const counts = new Map();
     for (const c of creep.room.find(FIND_MY_CREEPS)) {
-        if (c.memory.role === 'harvester' && c.memory.sourceId) {
+        if (c.memory.role === 'harvester' && c.memory.sourceId && c.name !== creep.name) {
             counts.set(c.memory.sourceId, ((_a = counts.get(c.memory.sourceId)) !== null && _a !== void 0 ? _a : 0) + 1);
         }
+    }
+    // Rebalance: if our source has 2+ more harvesters than the least-loaded one, re-assign
+    if (creep.memory.sourceId) {
+        const currentCount = (_b = counts.get(creep.memory.sourceId)) !== null && _b !== void 0 ? _b : 0;
+        const minCount = sources.reduce((min, src) => { var _a; return Math.min(min, (_a = counts.get(src.id)) !== null && _a !== void 0 ? _a : 0); }, Infinity);
+        if (currentCount - minCount < 2) {
+            return Game.getObjectById(creep.memory.sourceId);
+        }
+        creep.memory.sourceId = undefined;
     }
     const best = sources.reduce((a, b) => { var _a, _b; return ((_a = counts.get(a.id)) !== null && _a !== void 0 ? _a : 0) <= ((_b = counts.get(b.id)) !== null && _b !== void 0 ? _b : 0) ? a : b; });
     creep.memory.sourceId = best.id;
@@ -579,13 +656,24 @@ function runHauler(creep) {
     if (!creep.memory.working && creep.store.getFreeCapacity() === 0)
         creep.memory.working = true;
     creep.memory.working ? deliver(creep) : collect(creep);
+    // Eager transition: skip the idle tick when a phase just completed.
+    // Without this, the working-state flip only fires at the top of the NEXT tick,
+    // leaving the creep standing at spawn/container for one wasted tick.
+    if (creep.memory.working && creep.store[RESOURCE_ENERGY] === 0) {
+        creep.memory.working = false;
+        collect(creep);
+    }
+    else if (!creep.memory.working && creep.store.getFreeCapacity() === 0) {
+        creep.memory.working = true;
+        deliver(creep);
+    }
 }
 function collect(creep) {
     // Fullest source container first
     const container = getBestSourceContainer(creep.room);
     if (container) {
         if (creep.withdraw(container, RESOURCE_ENERGY) === ERR_NOT_IN_RANGE) {
-            creep.moveTo(container, { reusePath: 5 });
+            moveTo(creep, container, { reusePath: 5 });
         }
         return;
     }
@@ -595,13 +683,13 @@ function collect(creep) {
     });
     if (dropped) {
         if (creep.pickup(dropped) === ERR_NOT_IN_RANGE)
-            creep.moveTo(dropped, { reusePath: 3 });
+            moveTo(creep, dropped, { reusePath: 3 });
         return;
     }
     // Nothing ready — wait near spawn rather than wandering
     const spawn = creep.room.find(FIND_MY_SPAWNS)[0];
     if (spawn)
-        creep.moveTo(spawn, { reusePath: 20, range: 3 });
+        moveTo(creep, spawn, { reusePath: 20, range: 3 });
 }
 function deliver(creep) {
     // Priority 1: spawn, extensions, towers — keep combat and spawning capacity full
@@ -618,7 +706,7 @@ function deliver(creep) {
     });
     if (urgent) {
         if (creep.transfer(urgent, RESOURCE_ENERGY) === ERR_NOT_IN_RANGE) {
-            creep.moveTo(urgent, { reusePath: 5 });
+            moveTo(creep, urgent, { reusePath: 5 });
         }
         return;
     }
@@ -626,14 +714,14 @@ function deliver(creep) {
     const storage = creep.room.storage;
     if (storage && storage.store.getFreeCapacity(RESOURCE_ENERGY) > 0) {
         if (creep.transfer(storage, RESOURCE_ENERGY) === ERR_NOT_IN_RANGE) {
-            creep.moveTo(storage, { reusePath: 5 });
+            moveTo(creep, storage, { reusePath: 5 });
         }
         return;
     }
     // Priority 3: upgrade controller to keep RC progressing
     const ctrl = creep.room.controller;
     if (ctrl && creep.upgradeController(ctrl) === ERR_NOT_IN_RANGE) {
-        creep.moveTo(ctrl, { reusePath: 5 });
+        moveTo(creep, ctrl, { reusePath: 5 });
     }
 }
 function getBestSourceContainer(room) {
@@ -673,21 +761,21 @@ function runCollector(creep) {
         // Live object available (room is visible)
         const live = Game.getObjectById(mem.targetScoreId);
         if (live) {
-            creep.moveTo(live.pos, { reusePath: 20 });
+            moveTo(creep, live.pos, { reusePath: 20 });
             return;
         }
         // Non-visible room: navigate to cached position
         const cached = (_b = Memory.scoreCache) === null || _b === void 0 ? void 0 : _b[mem.targetScoreId];
         if (cached) {
             const pos = new RoomPosition(cached.pos.x, cached.pos.y, cached.pos.roomName);
-            creep.moveTo(pos, { reusePath: 20 });
+            moveTo(creep, pos, { reusePath: 20 });
             return;
         }
         mem.targetScoreId = null;
     }
     // No known score: patrol toward home room
     const home = (_c = mem.homeRoom) !== null && _c !== void 0 ? _c : creep.room.name;
-    creep.moveTo(new RoomPosition(25, 25, home), { reusePath: 50 });
+    moveTo(creep, new RoomPosition(25, 25, home), { reusePath: 50 });
 }
 function findBestScore(creep) {
     if (typeof FIND_SCORES === 'undefined')
@@ -750,7 +838,7 @@ function runScout(creep) {
         return;
     const exit = creep.pos.findClosestByRange(exitDir);
     if (exit)
-        creep.moveTo(exit, { reusePath: 50 });
+        moveTo(creep, exit, { reusePath: 50 });
 }
 function pickTarget(creep) {
     var _a, _b, _c;
@@ -794,7 +882,7 @@ function runBuilder(creep) {
             });
             if (damaged) {
                 if (creep.repair(damaged) === ERR_NOT_IN_RANGE) {
-                    creep.moveTo(damaged, { reusePath: 5 });
+                    moveTo(creep, damaged, { reusePath: 5 });
                 }
                 return;
             }
@@ -805,17 +893,26 @@ function runBuilder(creep) {
             });
             if (spawn) {
                 if (creep.transfer(spawn, RESOURCE_ENERGY) === ERR_NOT_IN_RANGE) {
-                    creep.moveTo(spawn, { reusePath: 5 });
+                    moveTo(creep, spawn, { reusePath: 5 });
                 }
             }
             return;
         }
         if (creep.build(site) === ERR_NOT_IN_RANGE) {
-            creep.moveTo(site, { reusePath: 5 });
+            moveTo(creep, site, { reusePath: 5 });
         }
     }
     else {
         collectEnergy(creep);
+        // Eager transition: if collection just filled us, immediately start moving
+        // toward the build site instead of idling at the collection point for one tick.
+        if (creep.store.getFreeCapacity() === 0) {
+            creep.memory.working = true;
+            const site = creep.pos.findClosestByPath(FIND_CONSTRUCTION_SITES);
+            if (site && creep.build(site) === ERR_NOT_IN_RANGE) {
+                moveTo(creep, site, { reusePath: 5 });
+            }
+        }
     }
 }
 function collectEnergy(creep) {
@@ -826,7 +923,7 @@ function collectEnergy(creep) {
     });
     if (container) {
         if (creep.withdraw(container, RESOURCE_ENERGY) === ERR_NOT_IN_RANGE) {
-            creep.moveTo(container, { reusePath: 5 });
+            moveTo(creep, container, { reusePath: 5 });
         }
         return;
     }
@@ -834,7 +931,7 @@ function collectEnergy(creep) {
     const source = creep.pos.findClosestByPath(FIND_SOURCES_ACTIVE);
     if (source) {
         if (creep.harvest(source) === ERR_NOT_IN_RANGE) {
-            creep.moveTo(source, { reusePath: 5 });
+            moveTo(creep, source, { reusePath: 5 });
         }
     }
 }
@@ -852,7 +949,7 @@ function runHunter(creep) {
         }
         else {
             if (creep.attack(target) === ERR_NOT_IN_RANGE) {
-                creep.moveTo(target.pos, { reusePath: 3 });
+                moveTo(creep, target.pos, { reusePath: 3 });
             }
             return;
         }

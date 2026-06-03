@@ -1,4 +1,6 @@
 // Scout: patrols every room adjacent to any owned room.
+
+import { moveTo } from '../utils/trafficManager';
 // Rooms bordering owned territory are rescanned every BORDER_STALE_TICKS (100)
 // for early-warning purposes. Other room types use the standard STALE_TICKS (500).
 // Clears targetRoomName when all rooms are fresh to prevent idle bouncing.
@@ -18,7 +20,7 @@ export function runScout(creep: Creep): void {
         const exitDir = creep.room.findExitTo(targetRoom);
         if (exitDir !== ERR_NO_PATH && exitDir !== ERR_INVALID_ARGS) {
             const exit = creep.pos.findClosestByRange(exitDir);
-            if (exit) creep.moveTo(exit, { reusePath: 3 });
+            if (exit) moveTo(creep,exit, { reusePath: 3 });
         }
         return;
     }
@@ -110,7 +112,7 @@ function assignNextTarget(creep: Creep): void {
         const exitDir = creep.room.findExitTo(homeRoom.name);
         if (exitDir !== ERR_NO_PATH && exitDir !== ERR_INVALID_ARGS) {
             const exit = creep.pos.findClosestByRange(exitDir);
-            if (exit) creep.moveTo(exit, { reusePath: 5 });
+            if (exit) moveTo(creep,exit, { reusePath: 5 });
         }
     }
 }

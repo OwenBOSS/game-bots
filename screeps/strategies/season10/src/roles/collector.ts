@@ -2,6 +2,8 @@
 // Targets are tracked by ID. For non-visible rooms, falls back to the cached position
 // from Memory.scoreCache so the creep can navigate cross-room without line-of-sight.
 
+import { moveTo } from '../utils/trafficManager';
+
 export function runCollector(creep: Creep): void {
     const mem = creep.memory as any;
 
@@ -23,14 +25,14 @@ export function runCollector(creep: Creep): void {
         // Live object available (room is visible)
         const live = Game.getObjectById(mem.targetScoreId as Id<any>) as any;
         if (live) {
-            creep.moveTo(live.pos, { reusePath: 20 });
+            moveTo(creep, live.pos, { reusePath: 20 });
             return;
         }
         // Non-visible room: navigate to cached position
         const cached = Memory.scoreCache?.[mem.targetScoreId];
         if (cached) {
             const pos = new RoomPosition(cached.pos.x, cached.pos.y, cached.pos.roomName);
-            creep.moveTo(pos, { reusePath: 20 });
+            moveTo(creep, pos, { reusePath: 20 });
             return;
         }
         mem.targetScoreId = null;
@@ -38,7 +40,7 @@ export function runCollector(creep: Creep): void {
 
     // No known score: patrol toward home room
     const home = mem.homeRoom ?? creep.room.name;
-    creep.moveTo(new RoomPosition(25, 25, home), { reusePath: 50 });
+    moveTo(creep, new RoomPosition(25, 25, home), { reusePath: 50 });
 }
 
 export function findBestScore(creep: Creep): string | null {

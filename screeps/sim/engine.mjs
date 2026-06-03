@@ -123,8 +123,10 @@ function processBuild(s, buildPower, buildTarget) {
 
 // ─── Spawn decision ───────────────────────────────────────────────────────────
 
-function canAfford(role, avail) {
-  const cost = H.ROLE_SPEC[role]?.cost ?? 200;
+function canAfford(role, avail, harvesterCost = null) {
+  const cost = role === 'harvester' && harvesterCost != null
+    ? harvesterCost
+    : H.ROLE_SPEC[role]?.cost ?? 200;
   return avail >= cost ? role : null;
 }
 
@@ -132,6 +134,9 @@ function canAfford(role, avail) {
 // (not s.energy.avail, which may be near 0 after earlier spawns in the same step)
 export function decideNextSpawn(s, strategy, budget = null) {
   const avail        = budget ?? (s.energy?.avail ?? 0);
+  // Harvesters cost 300 regardless of body size — the cost is the BASE body; the real bot
+  // respawns bigger harvesters as old ones die, modeled here via income scaling in energyIncome.
+  const harvCost     = H.ROLE_SPEC.harvester.cost;  // fixed 300
   const rcl          = s.rcl ?? 2;
   const bottleneck   = H.detectBottleneck(s);
   const harvesters   = s.creeps.harvester   ?? 0;
@@ -147,45 +152,61 @@ export function decideNextSpawn(s, strategy, budget = null) {
   const maxHaulers    = rcl >= 4 ? 5  : rcl >= 3 ? 3  : 2;
   const maxUpgraders  = rcl >= 5 ? 15 : rcl >= 4 ? 10 : rcl >= 3 ? 8 : 5;
 
+  // firstAffordable: iterate priority pairs, fall through when role is needed but unaffordable.
+  // Uses RCL-scaled harvester cost so larger bodies are correctly priced.
+  function firstAffordable(...pairs) {
+    for (const [needed, role] of pairs) {
+      if (!needed) continue;
+      const cost = role === 'harvester' ? harvCost : (H.ROLE_SPEC[role]?.cost ?? 200);
+      if (avail >= cost) return role;
+    }
+    return null;
+  }
+
   if (strategy === 'upgradeRush') {
-    if (harvesters < maxHarvesters - 1) return canAfford('harvester', avail);
-    if (haulers    < maxHaulers - 1)    return canAfford('hauler',    avail);
-    if (upgraders  < maxUpgraders)      return canAfford('upgrader',  avail);
-    return null;  // all targets met; don't over-spawn
+    return firstAffordable(
+      [harvesters < maxHarvesters - 1, 'harvester'],
+      [haulers    < maxHaulers    - 1, 'hauler'],
+      [upgraders  < maxUpgraders,      'upgrader'],
+    );
   }
 
   if (strategy === 'economyStack') {
-    if (harvesters < maxHarvesters + 2) return canAfford('harvester', avail);
-    if (haulers    < maxHaulers    + 1) return canAfford('hauler',    avail);
-    if (upgraders  < maxUpgraders  - 2) return canAfford('upgrader',  avail);
-    return null;  // all targets met; excess haulers crowd out upgrader replacement
+    // 2 harvesters (1 per source) + adequate haulers, then flood upgraders.
+    // Keeping economy lean leaves budget for upgrader replacement.
+    return firstAffordable(
+      [harvesters < 2,             'harvester'],
+      [haulers    < maxHaulers,    'hauler'],
+      [upgraders  < maxUpgraders,  'upgrader'],
+    );
   }
 
   if (strategy === 'military') {
-    if (harvesters < maxHarvesters - 1) return canAfford('harvester', avail);
-    if (haulers    < maxHaulers    - 1) return canAfford('hauler',    avail);
-    if (warriors   < 4)                 return canAfford('warrior',   avail);
-    if (upgraders  < maxUpgraders  - 3) return canAfford('upgrader',  avail);
-    return null;
+    return firstAffordable(
+      [harvesters < maxHarvesters - 1, 'harvester'],
+      [haulers    < maxHaulers    - 1, 'hauler'],
+      [warriors   < 4,                 'warrior'],
+      [upgraders  < maxUpgraders  - 3, 'upgrader'],
+    );
   }
 
   if (strategy === 'remoteMiner') {
-    // Economy base first, then invest in remote mining infrastructure
-    if (harvesters   < maxHarvesters)    return canAfford('harvester',   avail);
-    if (haulers      < maxHaulers)       return canAfford('hauler',       avail);
-    if (remoteMiners < 2)                return canAfford('remoteMiner', avail);
-    if (couriers     < 2)                return canAfford('courier',     avail);
-    if (upgraders    < maxUpgraders - 3) return canAfford('upgrader',    avail);
-    return null;
+    return firstAffordable(
+      [harvesters   < maxHarvesters,    'harvester'],
+      [haulers      < maxHaulers,        'hauler'],
+      [remoteMiners < 2,                 'remoteMiner'],
+      [couriers     < 2,                 'courier'],
+      [upgraders    < maxUpgraders - 3,  'upgrader'],
+    );
   }
 
   if (strategy === 'towerDefense') {
-    // Extra builders early to get a tower up at RCL3, then pivot to economy
-    if (harvesters < maxHarvesters - 1)  return canAfford('harvester', avail);
-    if (haulers    < maxHaulers    - 1)  return canAfford('hauler',    avail);
-    if (builders   < 2 && rcl >= 2)     return canAfford('builder',   avail);
-    if (upgraders  < maxUpgraders  - 2)  return canAfford('upgrader',  avail);
-    return null;
+    return firstAffordable(
+      [harvesters < maxHarvesters - 1,  'harvester'],
+      [haulers    < maxHaulers    - 1,  'hauler'],
+      [builders   < 2 && rcl >= 2,      'builder'],
+      [upgraders  < maxUpgraders  - 2,  'upgrader'],
+    );
   }
 
   // adaptive (default): bottleneck-driven priority list
@@ -205,7 +226,7 @@ export function decideNextSpawn(s, strategy, budget = null) {
   }[bottleneck] ?? ['harvester', 'hauler', 'upgrader'];
 
   for (const role of priority) {
-    const r = canAfford(role, avail);
+    const r = canAfford(role, avail, role === 'harvester' ? harvCost : null);
     if (r) return r;
   }
   return null;

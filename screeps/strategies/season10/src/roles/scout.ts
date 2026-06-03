@@ -1,6 +1,8 @@
 // Scout role — [MOVE] only. Expands visibility by visiting unexplored adjacent rooms.
 // Registers every room it enters in Memory.knownRooms for collectors to use.
 
+import { moveTo } from '../utils/trafficManager';
+
 export function runScout(creep: Creep): void {
     // Register current room
     if (!Memory.knownRooms) Memory.knownRooms = [];
@@ -15,7 +17,7 @@ export function runScout(creep: Creep): void {
     if (exitDir === ERR_NO_PATH || exitDir === ERR_INVALID_ARGS) return;
 
     const exit = creep.pos.findClosestByRange(exitDir as ExitConstant);
-    if (exit) creep.moveTo(exit, { reusePath: 50 });
+    if (exit) moveTo(creep, exit, { reusePath: 50 });
 }
 
 function pickTarget(creep: Creep): string | null {

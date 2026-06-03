@@ -145,5 +145,117 @@
     "description": "",
     "deployedAt": "2026-06-03T07:43:15.085Z",
     "gitHash": "9b3fec9"
+  },
+  {
+    "name": "2026-06-03-ee3e78a",
+    "strategy": "adaptive",
+    "description": "",
+    "deployedAt": "2026-06-03T15:58:03.737Z",
+    "gitHash": "ee3e78a"
+  },
+  {
+    "name": "2026-06-03-ee3e78a",
+    "strategy": "season10",
+    "description": "",
+    "deployedAt": "2026-06-03T15:58:06.665Z",
+    "gitHash": "ee3e78a"
+  },
+  {
+    "name": "2026-06-03-ee3e78a",
+    "strategy": "adaptive",
+    "description": "",
+    "deployedAt": "2026-06-03T15:59:56.923Z",
+    "gitHash": "ee3e78a"
+  },
+  {
+    "name": "2026-06-03-ee3e78a",
+    "strategy": "season10",
+    "description": "",
+    "deployedAt": "2026-06-03T15:59:59.746Z",
+    "gitHash": "ee3e78a"
+  },
+  {
+    "name": "2026-06-03-ee3e78a",
+    "strategy": "adaptive",
+    "description": "",
+    "deployedAt": "2026-06-03T16:00:21.267Z",
+    "gitHash": "ee3e78a"
+  },
+  {
+    "name": "2026-06-03-ee3e78a",
+    "strategy": "season10",
+    "description": "",
+    "deployedAt": "2026-06-03T16:00:24.516Z",
+    "gitHash": "ee3e78a"
+  },
+  {
+    "name": "2026-06-03-ee3e78a",
+    "strategy": "adaptive",
+    "description": "",
+    "deployedAt": "2026-06-03T16:04:10.573Z",
+    "gitHash": "ee3e78a"
+  },
+  {
+    "name": "2026-06-03-ee3e78a",
+    "strategy": "season10",
+    "description": "",
+    "deployedAt": "2026-06-03T16:04:13.394Z",
+    "gitHash": "ee3e78a"
+  },
+  {
+    "name": "2026-06-03-ee3e78a",
+    "strategy": "adaptive",
+    "description": "",
+    "deployedAt": "2026-06-03T16:14:26.208Z",
+    "gitHash": "ee3e78a"
+  },
+  {
+    "name": "2026-06-03-ee3e78a",
+    "strategy": "season10",
+    "description": "",
+    "deployedAt": "2026-06-03T16:14:29.005Z",
+    "gitHash": "ee3e78a"
+  },
+  {
+    "name": "2026-06-03-ee3e78a",
+    "strategy": "adaptive",
+    "description": "",
+    "deployedAt": "2026-06-03T16:23:30.409Z",
+    "gitHash": "ee3e78a"
+  },
+  {
+    "name": "2026-06-03-ee3e78a",
+    "strategy": "season10",
+    "description": "",
+    "deployedAt": "2026-06-03T16:23:33.308Z",
+    "gitHash": "ee3e78a"
+  },
+  {
+    "name": "2026-06-03-ee3e78a",
+    "strategy": "adaptive",
+    "description": "",
+    "deployedAt": "2026-06-03T16:24:03.126Z",
+    "gitHash": "ee3e78a"
+  },
+  {
+    "name": "2026-06-03-ee3e78a",
+    "strategy": "season10",
+    "description": "",
+    "deployedAt": "2026-06-03T16:24:06.211Z",
+    "gitHash": "ee3e78a"
+  },
+  {
+    "name": "2026-06-03-ee3e78a",
+    "strategy": "adaptive",
+    "description": "",
+    "deployedAt": "2026-06-03T16:38:51.318Z",
+    "gitHash": "ee3e78a"
+  },
+  {
+    "name": "2026-06-03-ee3e78a",
+    "strategy": "season10",
+    "description": "",
+    "deployedAt": "2026-06-03T16:38:54.326Z",
+    "gitHash": "ee3e78a"
   }
 ]

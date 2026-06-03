@@ -3,6 +3,8 @@
 //
 // Priority: storage → containers → extensions → towers → ramparts → roads → repair → upgrade
 
+import { moveTo } from '../utils/trafficManager';
+
 export function runBuilder(creep: Creep): void {
     if (creep.memory.working && creep.store[RESOURCE_ENERGY] === 0) {
         creep.memory.working = false;
@@ -15,7 +17,7 @@ export function runBuilder(creep: Creep): void {
         const site = findBuildTarget(creep);
         if (site) {
             if (creep.build(site) === ERR_NOT_IN_RANGE) {
-                creep.moveTo(site, { reusePath: 5 });
+                moveTo(creep,site, { reusePath: 5 });
             }
             return;
         }
@@ -26,7 +28,7 @@ export function runBuilder(creep: Creep): void {
         });
         if (damagedRoad) {
             if (creep.repair(damagedRoad) === ERR_NOT_IN_RANGE) {
-                creep.moveTo(damagedRoad, { reusePath: 5 });
+                moveTo(creep,damagedRoad, { reusePath: 5 });
             }
             return;
         }
@@ -35,11 +37,20 @@ export function runBuilder(creep: Creep): void {
         const controller = creep.room.controller;
         if (controller) {
             if (creep.upgradeController(controller) === ERR_NOT_IN_RANGE) {
-                creep.moveTo(controller, { reusePath: 5 });
+                moveTo(creep,controller, { reusePath: 5 });
             }
         }
     } else {
         collectEnergy(creep);
+        // Eager transition: if collection just filled us, immediately start moving
+        // toward the build site instead of idling at the collection point for one tick.
+        if (creep.store.getFreeCapacity() === 0) {
+            creep.memory.working = true;
+            const site = findBuildTarget(creep);
+            if (site && creep.build(site) === ERR_NOT_IN_RANGE) {
+                moveTo(creep, site, { reusePath: 5 });
+            }
+        }
     }
 }
 
@@ -48,7 +59,7 @@ function collectEnergy(creep: Creep): void {
     const storage = creep.room.storage;
     if (storage && storage.store[RESOURCE_ENERGY] >= 200) {
         if (creep.withdraw(storage, RESOURCE_ENERGY) === ERR_NOT_IN_RANGE) {
-            creep.moveTo(storage, { reusePath: 5 });
+            moveTo(creep,storage, { reusePath: 5 });
         }
         return;
     }
@@ -64,7 +75,7 @@ function collectEnergy(creep: Creep): void {
             a.store[RESOURCE_ENERGY] >= b.store[RESOURCE_ENERGY] ? a : b
         );
         if (creep.withdraw(target, RESOURCE_ENERGY) === ERR_NOT_IN_RANGE) {
-            creep.moveTo(target, { reusePath: 5 });
+            moveTo(creep,target, { reusePath: 5 });
         }
         return;
     }
@@ -75,7 +86,7 @@ function collectEnergy(creep: Creep): void {
     });
     if (dropped) {
         if (creep.pickup(dropped) === ERR_NOT_IN_RANGE) {
-            creep.moveTo(dropped, { reusePath: 3 });
+            moveTo(creep,dropped, { reusePath: 3 });
         }
         return;
     }
@@ -88,7 +99,7 @@ function collectEnergy(creep: Creep): void {
     if (!hasContainers) {
         const source = creep.pos.findClosestByPath(FIND_SOURCES_ACTIVE);
         if (source && creep.harvest(source) === ERR_NOT_IN_RANGE) {
-            creep.moveTo(source, { reusePath: 5 });
+            moveTo(creep,source, { reusePath: 5 });
         }
     }
 }

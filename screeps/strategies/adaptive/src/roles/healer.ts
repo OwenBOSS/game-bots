@@ -3,6 +3,8 @@
 // MAIN hold-and-wait, FLANK waypoints. Then heals the most wounded ally.
 // Reads combat state from homeRoom.memory.combatState (per-room FSM).
 
+import { moveTo as smartMove } from '../utils/trafficManager';
+
 const HEAL_THRESHOLD = 0.85;
 
 export function runHealer(creep: Creep): void {
@@ -70,7 +72,7 @@ function healPlatoon(creep: Creep): void {
         });
 
     if (targets.length === 0) {
-        creep.moveTo(new RoomPosition(25, 25, creep.room.name), { reusePath: 10 });
+        smartMove(creep,new RoomPosition(25, 25, creep.room.name), { reusePath: 10 });
         return;
     }
 
@@ -84,9 +86,9 @@ function healPlatoon(creep: Creep): void {
         creep.heal(healTarget);
     } else if (range <= 3) {
         creep.rangedHeal(healTarget);
-        creep.moveTo(healTarget, { reusePath: 2 });
+        smartMove(creep,healTarget, { reusePath: 2 });
     } else {
-        creep.moveTo(healTarget, { reusePath: 2 });
+        smartMove(creep,healTarget, { reusePath: 2 });
     }
 }
 
@@ -98,7 +100,7 @@ function rallyAtSpawn(creep: Creep): void {
     if (!spawn) return;
     const target = stagingArea(creep.room, spawn);
     if (creep.pos.getRangeTo(target) > 1) {
-        creep.moveTo(target, { reusePath: 5 });
+        smartMove(creep,target, { reusePath: 5 });
     }
 }
 
@@ -111,7 +113,7 @@ function yieldToEconomy(creep: Creep): boolean {
     if (source) {
         const dx = Math.sign(creep.pos.x - source.pos.x) || 1;
         const dy = Math.sign(creep.pos.y - source.pos.y) || 1;
-        creep.moveTo(new RoomPosition(
+        smartMove(creep,new RoomPosition(
             Math.min(48, Math.max(1, creep.pos.x + dx * 3)),
             Math.min(48, Math.max(1, creep.pos.y + dy * 3)),
             creep.room.name,
@@ -157,6 +159,6 @@ function moveToRoom(creep: Creep, roomName: string): void {
     const exitDir = creep.room.findExitTo(roomName);
     if (exitDir !== ERR_NO_PATH && exitDir !== ERR_INVALID_ARGS) {
         const exit = creep.pos.findClosestByRange(exitDir);
-        if (exit) creep.moveTo(exit, { reusePath: 3 });
+        if (exit) smartMove(creep,exit, { reusePath: 3 });
     }
 }

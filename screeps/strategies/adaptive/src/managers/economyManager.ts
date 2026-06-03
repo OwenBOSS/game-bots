@@ -197,6 +197,7 @@ export function calcDynamicTargets(room: Room): DynamicTargets {
     const avgContainerFill = avgField(h, 'containerFillPct', 50);
 
     // ── Harvesters ────────────────────────────────────────────────────────────
+    // RC1: no harvesters — upgrader role handles mining+upgrading directly.
     // Bootstrap (no source containers yet): small mobile harvesters act as
     // combined harvester+hauler — up to 3 per source so cheap bodies cover
     // the supply gap while containers are being built.
@@ -208,7 +209,7 @@ export function calcDynamicTargets(room: Room): DynamicTargets {
             filter: s => s.structureType === STRUCTURE_CONTAINER,
         }).length > 0
     );
-    const harvester = hasSourceContainers
+    const harvester = rcl <= 1 ? 0 : hasSourceContainers
         ? sources.length
         : sources.reduce((sum, src) => sum + Math.min(walkableAround(src), 3), 0);
 
@@ -259,16 +260,24 @@ export function calcDynamicTargets(room: Room): DynamicTargets {
     // ── Upgrader ──────────────────────────────────────────────────────────────
     // RC8: controller is maxed — no more leveling up. Spawn 1 maintenance upgrader
     // only when the downgrade timer is running low (< 50k of 200k ticks).
+    // RC1: upgrade-only mode (200 XP to RC2, 20k TTD). Upgraders fall through
+    // to FIND_SOURCES_ACTIVE in getEnergy() so they mine + upgrade without a
+    // container — no harvester or hauler needed at this level.
+    // RC2: 10k TTD is the shortest window of any level. Keep 1 upgrader alive
+    // even before a controller container exists so the 3k-tick emergency buffer
+    // never gets exercised.
     // All other levels: PID output drives count; high energy → more upgraders.
     let upgrader: number;
     if (rcl >= 8) {
         const ttd = room.controller?.ticksToDowngrade ?? 200_000;
         upgrader = upgraderHasLocalEnergy && ttd < 50_000 ? 1 : 0;
+    } else if (rcl <= 1) {
+        upgrader = 3;
     } else {
         const pidOutput = room.memory.pidState?.output ?? DEFAULT_PID_CONFIG.outputMid;
         upgrader = upgraderHasLocalEnergy
             ? Math.max(0, Math.min(4, Math.round(pidOutput)))
-            : 0;
+            : (rcl <= 2 ? 1 : 0);
     }
 
     const repairer  = 0; // phase override in spawnManager handles DEFEND

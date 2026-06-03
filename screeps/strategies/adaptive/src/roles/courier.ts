@@ -1,4 +1,6 @@
 // Courier: physically carries energy from a surplus room to a deficit room.
+
+import { moveTo } from '../utils/trafficManager';
 // Used before RCL 6 (no terminals). At RCL 6+, transferManager switches to
 // terminal transfers and couriers are no longer spawned.
 //
@@ -33,7 +35,7 @@ function collect(creep: Creep): void {
     const storage = creep.room.storage;
     if (storage && storage.store[RESOURCE_ENERGY] >= 500) {
         if (creep.withdraw(storage, RESOURCE_ENERGY) === ERR_NOT_IN_RANGE) {
-            creep.moveTo(storage, { reusePath: 5 });
+            moveTo(creep,storage, { reusePath: 5 });
         }
         return;
     }
@@ -44,13 +46,13 @@ function collect(creep: Creep): void {
     }) as StructureContainer | null;
     if (container) {
         if (creep.withdraw(container, RESOURCE_ENERGY) === ERR_NOT_IN_RANGE) {
-            creep.moveTo(container, { reusePath: 5 });
+            moveTo(creep,container, { reusePath: 5 });
         }
         return;
     }
 
     // Source room has no energy to spare — idle near storage
-    if (storage) creep.moveTo(storage, { reusePath: 10 });
+    if (storage) moveTo(creep,storage, { reusePath: 10 });
 }
 
 function deliver(creep: Creep): void {
@@ -70,7 +72,7 @@ function deliver(creep: Creep): void {
     });
     if (spawnTarget) {
         if (creep.transfer(spawnTarget, RESOURCE_ENERGY) === ERR_NOT_IN_RANGE) {
-            creep.moveTo(spawnTarget, { reusePath: 5 });
+            moveTo(creep,spawnTarget, { reusePath: 5 });
         }
         return;
     }
@@ -78,7 +80,7 @@ function deliver(creep: Creep): void {
     const destStorage = creep.room.storage;
     if (destStorage && destStorage.store.getFreeCapacity(RESOURCE_ENERGY) > 0) {
         if (creep.transfer(destStorage, RESOURCE_ENERGY) === ERR_NOT_IN_RANGE) {
-            creep.moveTo(destStorage, { reusePath: 5 });
+            moveTo(creep,destStorage, { reusePath: 5 });
         }
         return;
     }
@@ -89,7 +91,7 @@ function deliver(creep: Creep): void {
     }) as StructureContainer | null;
     if (container) {
         if (creep.transfer(container, RESOURCE_ENERGY) === ERR_NOT_IN_RANGE) {
-            creep.moveTo(container, { reusePath: 5 });
+            moveTo(creep,container, { reusePath: 5 });
         }
     }
 }
@@ -98,6 +100,6 @@ function moveToRoom(creep: Creep, roomName: string): void {
     const exitDir = creep.room.findExitTo(roomName);
     if (exitDir !== ERR_NO_PATH && exitDir !== ERR_INVALID_ARGS) {
         const exit = creep.pos.findClosestByRange(exitDir);
-        if (exit) creep.moveTo(exit, { reusePath: 3 });
+        if (exit) moveTo(creep,exit, { reusePath: 3 });
     }
 }

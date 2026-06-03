@@ -22,13 +22,16 @@ function makeBuilderCreep(opts: {
     const energy = opts.energy ?? 0;
     const cap = opts.cap ?? 100;
     return {
+        name: 'builder1',
         memory: { role: 'builder', working: opts.working ?? false },
         store: {
             [(global as any).RESOURCE_ENERGY]: energy,
             getFreeCapacity: () => cap - energy,
         },
+        room: { name: 'W1N1' },
         pos: {
             findClosestByPath: vi.fn(() => null),
+            getRangeTo: vi.fn(() => 0),
         },
         harvest:  vi.fn(() => 0),
         build:    vi.fn(() => 0),

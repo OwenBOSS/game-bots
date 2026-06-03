@@ -2,6 +2,8 @@
 // Collects from containers to avoid competing with harvesters at source tiles.
 // Falls back to direct harvest only when no containers have energy yet.
 
+import { moveTo } from '../utils/trafficManager';
+
 export function runBuilder(creep: Creep): void {
     if (creep.memory.working && creep.store[RESOURCE_ENERGY] === 0) {
         creep.memory.working = false;
@@ -23,7 +25,7 @@ export function runBuilder(creep: Creep): void {
             });
             if (damaged) {
                 if (creep.repair(damaged as Structure) === ERR_NOT_IN_RANGE) {
-                    creep.moveTo(damaged, { reusePath: 5 });
+                    moveTo(creep, damaged, { reusePath: 5 });
                 }
                 return;
             }
@@ -35,16 +37,25 @@ export function runBuilder(creep: Creep): void {
             });
             if (spawn) {
                 if (creep.transfer(spawn, RESOURCE_ENERGY) === ERR_NOT_IN_RANGE) {
-                    creep.moveTo(spawn, { reusePath: 5 });
+                    moveTo(creep, spawn, { reusePath: 5 });
                 }
             }
             return;
         }
         if (creep.build(site) === ERR_NOT_IN_RANGE) {
-            creep.moveTo(site, { reusePath: 5 });
+            moveTo(creep, site, { reusePath: 5 });
         }
     } else {
         collectEnergy(creep);
+        // Eager transition: if collection just filled us, immediately start moving
+        // toward the build site instead of idling at the collection point for one tick.
+        if (creep.store.getFreeCapacity() === 0) {
+            creep.memory.working = true;
+            const site = creep.pos.findClosestByPath(FIND_CONSTRUCTION_SITES);
+            if (site && creep.build(site) === ERR_NOT_IN_RANGE) {
+                moveTo(creep, site, { reusePath: 5 });
+            }
+        }
     }
 }
 
@@ -57,7 +68,7 @@ function collectEnergy(creep: Creep): void {
     }) as StructureContainer | null;
     if (container) {
         if (creep.withdraw(container, RESOURCE_ENERGY) === ERR_NOT_IN_RANGE) {
-            creep.moveTo(container, { reusePath: 5 });
+            moveTo(creep, container, { reusePath: 5 });
         }
         return;
     }
@@ -65,7 +76,7 @@ function collectEnergy(creep: Creep): void {
     const source = creep.pos.findClosestByPath(FIND_SOURCES_ACTIVE);
     if (source) {
         if (creep.harvest(source) === ERR_NOT_IN_RANGE) {
-            creep.moveTo(source, { reusePath: 5 });
+            moveTo(creep, source, { reusePath: 5 });
         }
     }
 }

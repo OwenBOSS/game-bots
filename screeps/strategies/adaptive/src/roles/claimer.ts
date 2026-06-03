@@ -1,6 +1,8 @@
 // Claims a neutral controller in the target room.
 // Once claimed, suicide — expansionManager handles the rest.
 
+import { moveTo } from '../utils/trafficManager';
+
 export function runClaimer(creep: Creep): void {
     const targetRoom = creep.memory.targetRoomName;
     if (!targetRoom) return;
@@ -9,7 +11,7 @@ export function runClaimer(creep: Creep): void {
         const exitDir = creep.room.findExitTo(targetRoom);
         if (exitDir !== ERR_NO_PATH && exitDir !== ERR_INVALID_ARGS) {
             const exit = creep.pos.findClosestByRange(exitDir);
-            if (exit) creep.moveTo(exit, { reusePath: 3 });
+            if (exit) moveTo(creep,exit, { reusePath: 3 });
         }
         return;
     }
@@ -28,12 +30,12 @@ export function runClaimer(creep: Creep): void {
     // If reserved by enemy, attack the reservation first
     if (controller.reservation && controller.reservation.username !== creep.owner.username) {
         if (creep.attackController(controller) === ERR_NOT_IN_RANGE) {
-            creep.moveTo(controller, { reusePath: 3 });
+            moveTo(creep,controller, { reusePath: 3 });
         }
         return;
     }
 
     if (creep.claimController(controller) === ERR_NOT_IN_RANGE) {
-        creep.moveTo(controller, { reusePath: 3 });
+        moveTo(creep,controller, { reusePath: 3 });
     }
 }

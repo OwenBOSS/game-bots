@@ -52,6 +52,24 @@ export const ROLE_SPEC = {
   courier:     { parts: 9, carryParts: 8, carryCapacity: 400, cost: 550 },  // long-haul hauler
 };
 
+// ─── RCL-aware body scaling ───────────────────────────────────────────────────
+// As extensions are built, the spawn can afford larger harvester bodies.
+// This models the real bot's dynamic body scaling (bodyBuilder.ts).
+
+// WORK parts a stationary harvester can have, constrained to fit in the spawn pool.
+// Body: N×WORK + 1×MOVE + 1×CARRY = N*100 + 100 total cost ≤ spawnCap.
+// spawnCap = 300 + (built extensions)×50 + storage bonus
+export function harvesterWorkParts(spawnCap) {
+  // Max WORK parts such that (wp * 100 + 100) ≤ spawnCap
+  const maxWP = Math.floor((spawnCap - 100) / 100);
+  return Math.max(1, Math.min(maxWP, 6));  // at least 1 WORK, at most 6 (source regen limit)
+}
+
+// Spawn cost for the largest harvester body that fits in the spawn pool.
+export function harvesterCostForCap(spawnCap) {
+  return harvesterWorkParts(spawnCap) * 100 + 100;
+}
+
 // ─── Movement ────────────────────────────────────────────────────────────────
 
 export function moveTicks(distance, hasRoads = false) {
@@ -61,11 +79,13 @@ export function moveTicks(distance, hasRoads = false) {
 // ─── Energy flow ─────────────────────────────────────────────────────────────
 
 // Gross energy harvested per tick. With containers, harvesters park and harvest continuously.
+// NOTE: This uses fixed 2-WORK harvesters (RCL2 baseline). Body size scaling (bigger harvesters
+// at higher RCL) is a known limitation — it requires tracking per-creep spawn history.
 export function energyIncome(harvesterCount, sourceCount, hasContainers) {
   if (!hasContainers) {
     return harvesterCount * HARVEST_PER_WORK;
   }
-  const perHarvesterOutput = HARVEST_PER_WORK * 2;
+  const perHarvesterOutput = HARVEST_PER_WORK * 2;  // 2 WORK parts per stationary harvester
   const activeHarvesters   = Math.min(harvesterCount, sourceCount);
   return Math.min(sourceCount * SOURCE_REGEN_RATE, activeHarvesters * perHarvesterOutput);
 }

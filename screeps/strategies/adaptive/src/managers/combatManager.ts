@@ -2,7 +2,7 @@ import { CombatState } from '../types';
 import { manageTactics } from './tacticsManager';
 import { manageQuads } from './quadManager';
 
-const MIN_FIGHTERS_TO_MARCH = 3;
+const MIN_FIGHTERS_TO_MARCH = 4;
 const MIN_HEALERS_TO_MARCH  = 1;
 const RAID_STRENGTH_MAX     = 15;  // raid without healer if enemy this weak
 const REASSESS_INTERVAL     = 500;
@@ -126,12 +126,25 @@ function manageTowers(room: Room): void {
         return;
     }
 
-    // No hostiles, no damaged creeps: repair the highest-priority rampart.
+    // Priority 3 (strategy report §Military): repair highest-priority rampart.
     const fortifyTarget = getFortifyTarget(room);
     if (fortifyTarget) {
         for (const tower of towers) {
             if (tower.store[RESOURCE_ENERGY] < TOWER_ENERGY_COST) continue;
             tower.repair(fortifyTarget);
+        }
+        return;
+    }
+
+    // Priority 4: repair damaged roads (< 50% hits) when tower tanks are healthy.
+    // Only when energy > 700 — keep reserves high in case hostiles appear next tick.
+    const damagedRoad = room.find(FIND_STRUCTURES, {
+        filter: s => s.structureType === STRUCTURE_ROAD && s.hits < s.hitsMax * 0.5,
+    })[0] as StructureRoad | undefined;
+    if (damagedRoad) {
+        for (const tower of towers) {
+            if (tower.store[RESOURCE_ENERGY] < 700) continue;
+            tower.repair(damagedRoad);
         }
     }
 }
@@ -213,7 +226,10 @@ function manageCombatState(room: Room): void {
         case 'MARCH': {
             if (fighters.length === 0) { room.memory.combatState = 'RALLY'; break; }
             const inEnemyRoom = fighters.filter(c => c.room.name === enemyRoom);
-            if (inEnemyRoom.length > 0) {
+            // Wait until ALL remaining fighters are in the enemy room so the group
+            // enters together. "All" is capped at fighters.length so a death en route
+            // doesn't permanently stall the march.
+            if (inEnemyRoom.length > 0 && inEnemyRoom.length >= fighters.length) {
                 room.memory.combatState = 'ENGAGE';
                 console.log(`[${room.name}] Combat → ENGAGE`);
             }

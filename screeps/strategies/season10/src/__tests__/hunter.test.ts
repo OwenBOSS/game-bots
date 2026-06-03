@@ -9,7 +9,7 @@ function makeHunterCreep(opts: {
     const targetId = opts.hasTarget ? 'enemy1' : null;
     return {
         room: { name: opts.room ?? 'W1N1' },
-        pos: { getRangeTo: vi.fn(() => 3) },
+        pos: { getRangeTo: vi.fn(() => 0) },
         memory: { role: 'hunter', targetId, working: false },
         moveTo: vi.fn(() => 0),
         attack: vi.fn(() => 0),

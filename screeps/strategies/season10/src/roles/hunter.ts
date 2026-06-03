@@ -2,6 +2,8 @@
 // Spawned only when hostiles are detected in rooms that have known Scores.
 // Targets hostile creeps in rooms that appear in Memory.scoreCache.
 
+import { moveTo } from '../utils/trafficManager';
+
 export function runHunter(creep: Creep): void {
     const mem = creep.memory as any;
 
@@ -12,7 +14,7 @@ export function runHunter(creep: Creep): void {
             mem.targetId = null;
         } else {
             if (creep.attack(target as Creep) === ERR_NOT_IN_RANGE) {
-                creep.moveTo((target as any).pos, { reusePath: 3 });
+                moveTo(creep, (target as any).pos, { reusePath: 3 });
             }
             return;
         }

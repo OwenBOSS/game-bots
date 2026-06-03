@@ -6,13 +6,19 @@ function roomWith(opts: {
     level?: number;
     energy?: number;
     harvesters?: number;
+    haulers?: number;
     collectors?: number;
     scouts?: number;
     storage?: number;
     memory?: any;
+    structures?: any[];
+    sources?: any[];
 }): any {
     const harvesters = Array.from({ length: opts.harvesters ?? 0 }, (_, i) =>
         makeCreep({ name: `h${i}`, role: 'harvester' })
+    );
+    const haulers = Array.from({ length: opts.haulers ?? 0 }, (_, i) =>
+        makeCreep({ name: `ha${i}`, role: 'hauler' })
     );
     const collectors = Array.from({ length: opts.collectors ?? 0 }, (_, i) =>
         makeCreep({ name: `c${i}`, role: 'collector' })
@@ -25,8 +31,10 @@ function roomWith(opts: {
         energyAvailable: opts.energy ?? 300,
         controller: makeController({ level: opts.level ?? 1 }),
         storage: opts.storage !== undefined ? makeStorage(opts.storage) : undefined,
-        myCreeps: [...harvesters, ...collectors, ...scouts],
+        myCreeps: [...harvesters, ...haulers, ...collectors, ...scouts],
         mySpawns: [spawn],
+        structures: opts.structures ?? [],
+        sources: opts.sources ?? [],
         memory: opts.memory ?? {},
     });
 }
@@ -183,6 +191,64 @@ describe('manageSpawns — RC5 collectors above upgraders', () => {
         expect(opts.memory.role).toBe('collector');
         // Should use RC5+ body at 660e
         expect(body.filter((p: string) => p === 'attack')).toHaveLength(2);
+    });
+});
+
+// ── Hauler spawn logic ─────────────────────────────────────────────────────────
+
+describe('manageSpawns — hauler spawning', () => {
+    function makeContainer(energy = 500): any {
+        return {
+            structureType: (global as any).STRUCTURE_CONTAINER,
+            store: { [(global as any).RESOURCE_ENERGY]: energy },
+        };
+    }
+
+    function makeSource(): any {
+        return { id: 'src1', pos: { x: 10, y: 10 } };
+    }
+
+    it('spawns a hauler when containers exist and haulers < source count', () => {
+        const container = makeContainer();
+        const room = roomWith({
+            level: 2, energy: 300, harvesters: 2,
+            structures: [container],
+            sources: [makeSource()],
+        });
+        manageSpawns(room);
+        const spawn = room.find((global as any).FIND_MY_SPAWNS)[0];
+        expect(spawn.spawnCreep).toHaveBeenCalled();
+        const [, , opts] = spawn.spawnCreep.mock.calls[0];
+        expect(opts.memory.role).toBe('hauler');
+    });
+
+    it('does not spawn hauler when no containers exist', () => {
+        const room = roomWith({
+            level: 2, energy: 300, harvesters: 2,
+            structures: [],   // no containers
+            sources: [makeSource()],
+        });
+        manageSpawns(room);
+        const spawn = room.find((global as any).FIND_MY_SPAWNS)[0];
+        if (spawn.spawnCreep.mock.calls.length > 0) {
+            const role = spawn.spawnCreep.mock.calls[0][2].memory.role;
+            expect(role).not.toBe('hauler');
+        }
+    });
+
+    it('does not spawn an extra hauler when count already meets source count', () => {
+        const container = makeContainer();
+        const room = roomWith({
+            level: 2, energy: 300, harvesters: 2, haulers: 1,
+            structures: [container],
+            sources: [makeSource()], // 1 source, 1 hauler → at quota
+        });
+        manageSpawns(room);
+        const spawn = room.find((global as any).FIND_MY_SPAWNS)[0];
+        const haulerSpawns = spawn.spawnCreep.mock.calls.filter(
+            (c: any[]) => c[2]?.memory?.role === 'hauler'
+        );
+        expect(haulerSpawns).toHaveLength(0);
     });
 });
 
