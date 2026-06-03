@@ -248,8 +248,40 @@ function manageCombatState(room: Room): void {
                 room.memory.scoutTick = undefined;
                 room.memory.rallyTick = Game.time;
             }
+            // Refresh intel from the battlefield every tick while fighters have visibility.
+            // remoteManager and spawnManager both gate on Memory.roomIntel[enemyRoom].enemyCreeps;
+            // without this, they wait up to 300 ticks for the scout to rescan the cleared room
+            // before spawning our reserver/miners/haulers.
+            if (enemyRoom) refreshBattlefieldIntel(enemyRoom);
             break;
     }
+}
+
+// Write live intel from the enemy room while our fighters are there.
+// Only runs when we actually have visibility (fighters are in the room → Game.rooms has it).
+// Mirrors recordRoomIntel in scout.ts but does NOT update owned rooms' enemyRoomName —
+// that stays as-is so the attack campaign continues until strategyManager clears it.
+function refreshBattlefieldIntel(roomName: string): void {
+    const target = Game.rooms[roomName];
+    if (!target) return; // no visibility yet (fighters still travelling)
+
+    const enemyCreeps  = target.find(FIND_HOSTILE_CREEPS).length;
+    const enemySpawns  = target.find(FIND_HOSTILE_STRUCTURES, { filter: s => s.structureType === STRUCTURE_SPAWN }).length;
+    const enemyTowers  = target.find(FIND_HOSTILE_STRUCTURES, { filter: s => s.structureType === STRUCTURE_TOWER }).length;
+    const strength     = enemyCreeps + enemySpawns * 5 + enemyTowers * 8;
+
+    if (!Memory.roomIntel) Memory.roomIntel = {};
+    const prev = Memory.roomIntel[roomName];
+    Memory.roomIntel[roomName] = {
+        scannedAt:       Game.time,
+        enemyCreeps,
+        enemySpawns,
+        enemyTowers,
+        strength,
+        hasController:   !!(target.controller),
+        controllerOwned: !!(target.controller?.owner),
+        sourceCount:     prev?.sourceCount ?? target.find(FIND_SOURCES).length,
+    };
 }
 
 function assignTargetRoom(units: Creep[], roomName: string): void {
