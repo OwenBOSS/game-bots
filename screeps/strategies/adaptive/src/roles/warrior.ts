@@ -184,7 +184,22 @@ function travelHome(creep: Creep): void {
 }
 
 function engageInRoom(creep: Creep): void {
-    // Quad-coordinated target takes priority (set by quadManager)
+    // Bait guard: if targetId is a stale hostile creep (e.g. orphaned from a dissolved quad)
+    // that is no longer actively engaging us, discard it when priority targets remain.
+    // This prevents warriors from chasing a kiting combat unit while the reserver/economy
+    // creeps are alive and uncontested.  Quad members are unaffected — their targetId is
+    // refreshed every tick by coordinateQuadTargets before this function runs.
+    if (creep.memory.targetId) {
+        const cached = Game.getObjectById(creep.memory.targetId as Id<Creep | AnyOwnedStructure>);
+        if (cached && 'body' in (cached as any)) {
+            const ourUnits = creep.room.find(FIND_MY_CREEPS);
+            if (!isEngaging(cached as Creep, ourUnits) && hasPriorityTargets(creep.room)) {
+                creep.memory.targetId = undefined;
+            }
+        }
+    }
+
+    // Quad-coordinated target takes priority (set by quadManager, refreshed every tick)
     const quadTarget = creep.memory.targetId
         ? Game.getObjectById(creep.memory.targetId as Id<Creep | AnyOwnedStructure>)
         : null;
@@ -213,29 +228,34 @@ function engageInRoom(creep: Creep): void {
 }
 
 function findCombatTarget(creep: Creep): Creep | AnyOwnedStructure | null {
-    // Priority: towers → combat creeps → reserver → economy creeps → spawns → structures
+    // Mirrors pickQuadTarget priority — see quadManager.ts for the full rationale.
+    // Independent (non-quad) warriors use findClosestByPath so multiple warriors
+    // naturally spread across different economy targets rather than piling on one.
     const tower = creep.pos.findClosestByPath(FIND_HOSTILE_STRUCTURES, {
         filter: s => s.structureType === STRUCTURE_TOWER,
     }) as StructureTower | null;
     if (tower) return tower;
 
     const allHostiles = creep.room.find(FIND_HOSTILE_CREEPS);
+    const ourUnits    = creep.room.find(FIND_MY_CREEPS);
 
-    const combatant = creep.pos.findClosestByPath(allHostiles.filter(c =>
-        c.body.some(p => p.type === ATTACK || p.type === RANGED_ATTACK || p.type === HEAL)
-    ));
-    if (combatant) return combatant;
+    // 1. Active threats only — enemy combat parts within attack range of any of our units.
+    const threat = creep.pos.findClosestByPath(allHostiles.filter(c => isEngaging(c, ourUnits)));
+    if (threat) return threat;
 
+    // 2. Reserver — kills their controller reservation.
     const reserver = creep.pos.findClosestByPath(allHostiles.filter(c =>
         c.body.some(p => p.type === CLAIM)
     ));
     if (reserver) return reserver;
 
-    const economyCreep = creep.pos.findClosestByPath(allHostiles.filter(c =>
+    // 3. Economy creeps (harvesters/haulers) — findClosestByPath spreads warriors across targets.
+    const economy = creep.pos.findClosestByPath(allHostiles.filter(c =>
         c.body.some(p => p.type === WORK || p.type === CARRY)
     ));
-    if (economyCreep) return economyCreep;
+    if (economy) return economy;
 
+    // 4. Passive/fleeing combatants — only once the room is clear of economy targets.
     if (allHostiles.length > 0) return creep.pos.findClosestByPath(allHostiles);
 
     const spawn = creep.pos.findClosestByPath(FIND_HOSTILE_STRUCTURES, {
@@ -244,6 +264,24 @@ function findCombatTarget(creep: Creep): Creep | AnyOwnedStructure | null {
     if (spawn) return spawn;
 
     return creep.pos.findClosestByPath(FIND_HOSTILE_STRUCTURES) as AnyOwnedStructure | null;
+}
+
+// True when the enemy has live ATTACK or RANGED_ATTACK parts within their effective
+// attack range of at least one of our creeps — i.e. they are actively engaging us.
+function isEngaging(enemy: Creep, allies: Creep[]): boolean {
+    const meleeRange  = enemy.body.some(p => p.type === ATTACK        && p.hits > 0) ? 1 : 0;
+    const rangedRange = enemy.body.some(p => p.type === RANGED_ATTACK  && p.hits > 0) ? 3 : 0;
+    const attackRange = Math.max(meleeRange, rangedRange);
+    if (attackRange === 0) return false;
+    return allies.some(ally => enemy.pos.getRangeTo(ally) <= attackRange);
+}
+
+// True when the room still has reserver/economy creeps — used by the bait guard to
+// decide whether ignoring a non-engaging combatant is the right call.
+function hasPriorityTargets(room: Room): boolean {
+    return room.find(FIND_HOSTILE_CREEPS).some(c =>
+        c.body.some(p => p.type === CLAIM || p.type === WORK || p.type === CARRY)
+    );
 }
 
 function moveToRoom(creep: Creep, roomName: string): void {

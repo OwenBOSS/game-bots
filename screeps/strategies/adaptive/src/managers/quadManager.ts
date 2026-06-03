@@ -99,42 +99,46 @@ function coordinateQuadTargets(room: Room): void {
     }
 }
 
-// Tower with lowest energy (drain focus) → combat creeps → reserver → economy creeps
-// (harvesters/haulers) → spawns → other structures.
-// Prioritising the reserver removes the enemy's claim on the room;
-// killing economy creeps maximises loot for our scavengers.
+// Target priority (room takeover focus):
+//   towers → active combat threats → reserver → economy creeps → passive/fleeing combatants
+//
+// "Active threat" means the enemy has working combat parts AND is within its attack range
+// of at least one of our units.  Enemies that are kiting/fleeing fall to the bottom so we
+// stay focused on killing the reserver and economy creeps, which is what actually takes
+// over the room.  Once there are no economy targets left, passive combatants are cleaned up.
 function pickQuadTarget(room: Room): Creep | AnyOwnedStructure | null {
     const towers = room.find(FIND_HOSTILE_STRUCTURES, {
         filter: s => s.structureType === STRUCTURE_TOWER,
     }) as StructureTower[];
 
     if (towers.length > 0) {
-        // Target the least-charged tower — empty towers are fully neutralised
         return towers.reduce((a, b) =>
             a.store[RESOURCE_ENERGY] < b.store[RESOURCE_ENERGY] ? a : b
         );
     }
 
-    const creeps = room.find(FIND_HOSTILE_CREEPS);
+    const creeps   = room.find(FIND_HOSTILE_CREEPS);
+    const ourUnits = room.find(FIND_MY_CREEPS);
+
     if (creeps.length > 0) {
-        // 1. Combat creeps (ATTACK / RANGED_ATTACK / HEAL) — active threat
-        const combatants = creeps.filter(c => threatScore(c) > 0);
-        if (combatants.length > 0) {
-            return combatants.reduce((a, b) => threatScore(b) > threatScore(a) ? b : a);
+        // 1. Active threats: enemy combat parts are in range of our units right now.
+        //    Must deal with them immediately or we take avoidable damage.
+        const activeThreats = creeps.filter(c => isEngaging(c, ourUnits));
+        if (activeThreats.length > 0) {
+            return activeThreats.reduce((a, b) => threatScore(b) > threatScore(a) ? b : a);
         }
 
-        // 2. Reserver (CLAIM parts) — kills their room reservation
+        // 2. Reserver — removing their claim lets our reserver take the controller.
         const reserver = creeps.find(c => c.body.some(p => p.type === CLAIM));
         if (reserver) return reserver;
 
-        // 3. Economy creeps (WORK / CARRY) — harvesters & haulers; loot drops on death
-        const economy = creeps.find(c =>
-            c.body.some(p => p.type === WORK || p.type === CARRY)
-        );
+        // 3. Economy creeps (harvesters/haulers) — soft targets; loot drops on death.
+        const economy = creeps.find(c => c.body.some(p => p.type === WORK || p.type === CARRY));
         if (economy) return economy;
 
-        // 4. Any remaining creep
-        return creeps[0];
+        // 4. Passive/fleeing combat creeps — low priority while economy targets remain;
+        //    once the room is clear of economy we mop these up too.
+        return creeps.reduce((a, b) => threatScore(b) > threatScore(a) ? b : a);
     }
 
     const spawns = room.find(FIND_HOSTILE_STRUCTURES, {
@@ -143,6 +147,17 @@ function pickQuadTarget(room: Room): Creep | AnyOwnedStructure | null {
     if (spawns.length > 0) return spawns[0] as AnyOwnedStructure;
 
     return room.find(FIND_HOSTILE_STRUCTURES)[0] as AnyOwnedStructure ?? null;
+}
+
+// Returns true when an enemy has LIVE combat parts (ATTACK or RANGED_ATTACK) and is
+// within their effective attack range of at least one of our units.
+// HEAL parts are not included — healers don't directly damage our creeps.
+function isEngaging(enemy: Creep, allies: Creep[]): boolean {
+    const meleeRange  = enemy.body.some(p => p.type === ATTACK        && p.hits > 0) ? 1 : 0;
+    const rangedRange = enemy.body.some(p => p.type === RANGED_ATTACK  && p.hits > 0) ? 3 : 0;
+    const attackRange = Math.max(meleeRange, rangedRange);
+    if (attackRange === 0) return false;
+    return allies.some(ally => enemy.pos.getRangeTo(ally) <= attackRange);
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────

@@ -50,7 +50,18 @@ function engage(creep: Creep): void {
         return;
     }
 
-    // Quad-coordinated target takes priority
+    // Bait guard — mirrors warrior.ts engageInRoom; see there for full rationale.
+    if (creep.memory.targetId) {
+        const cached = Game.getObjectById(creep.memory.targetId as Id<Creep | AnyOwnedStructure>);
+        if (cached && 'body' in (cached as any)) {
+            const ourUnits = creep.room.find(FIND_MY_CREEPS);
+            if (!isEngaging(cached as Creep, ourUnits) && hasPriorityTargets(creep.room)) {
+                creep.memory.targetId = undefined;
+            }
+        }
+    }
+
+    // Quad-coordinated target takes priority (refreshed every tick by coordinateQuadTargets)
     const quadTarget = creep.memory.targetId
         ? Game.getObjectById(creep.memory.targetId as Id<Creep | AnyOwnedStructure>)
         : null;
@@ -84,16 +95,45 @@ function engage(creep: Creep): void {
 }
 
 function findTarget(creep: Creep): Creep | AnyOwnedStructure | null {
-    // Rangers prioritize towers (high-value threat) then structures then creeps
+    // Same priority as warrior findCombatTarget — active threats → reserver → economy → fleeing.
     const tower = creep.pos.findClosestByPath(FIND_HOSTILE_STRUCTURES, {
         filter: s => s.structureType === STRUCTURE_TOWER,
     }) as StructureTower | null;
     if (tower) return tower;
 
-    const hostile = creep.pos.findClosestByPath(FIND_HOSTILE_CREEPS);
-    if (hostile) return hostile;
+    const allHostiles = creep.room.find(FIND_HOSTILE_CREEPS);
+    const ourUnits    = creep.room.find(FIND_MY_CREEPS);
+
+    const threat = creep.pos.findClosestByPath(allHostiles.filter(c => isEngaging(c, ourUnits)));
+    if (threat) return threat;
+
+    const reserver = creep.pos.findClosestByPath(allHostiles.filter(c =>
+        c.body.some(p => p.type === CLAIM)
+    ));
+    if (reserver) return reserver;
+
+    const economy = creep.pos.findClosestByPath(allHostiles.filter(c =>
+        c.body.some(p => p.type === WORK || p.type === CARRY)
+    ));
+    if (economy) return economy;
+
+    if (allHostiles.length > 0) return creep.pos.findClosestByPath(allHostiles);
 
     return creep.pos.findClosestByPath(FIND_HOSTILE_STRUCTURES) as AnyOwnedStructure | null;
+}
+
+function isEngaging(enemy: Creep, allies: Creep[]): boolean {
+    const meleeRange  = enemy.body.some(p => p.type === ATTACK        && p.hits > 0) ? 1 : 0;
+    const rangedRange = enemy.body.some(p => p.type === RANGED_ATTACK  && p.hits > 0) ? 3 : 0;
+    const attackRange = Math.max(meleeRange, rangedRange);
+    if (attackRange === 0) return false;
+    return allies.some(ally => enemy.pos.getRangeTo(ally) <= attackRange);
+}
+
+function hasPriorityTargets(room: Room): boolean {
+    return room.find(FIND_HOSTILE_CREEPS).some(c =>
+        c.body.some(p => p.type === CLAIM || p.type === WORK || p.type === CARRY)
+    );
 }
 
 function executeMarch(creep: Creep): void {
