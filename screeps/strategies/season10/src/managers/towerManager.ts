@@ -3,22 +3,25 @@
 //   1. Attack any hostile creep
 //   2. Heal any allied creep below 80% hits
 //   3. Repair any rampart below 10,000 hits
-//   4. Repair any road below 50% hits (only if tower energy > 700)
+//   4. Repair containers below 50% hits (prevents decay)
+//   5. Repair any road below 50% hits (only if tower energy > 700)
+
+import { findCached } from '../utils/tickCache';
 
 const HEAL_THRESHOLD    = 0.8;
 const RAMPART_MIN_HITS  = 10_000;
 const ROAD_ENERGY_MIN   = 700;
 
 export function manageTowers(room: Room): void {
-    const towers = room.find(FIND_MY_STRUCTURES).filter(
+    const towers = findCached<AnyStructure>(room, FIND_MY_STRUCTURES).filter(
         (s: AnyStructure) => s.structureType === STRUCTURE_TOWER
     ) as StructureTower[];
 
     if (towers.length === 0) return;
 
-    const hostiles = room.find(FIND_HOSTILE_CREEPS);
-    const allies   = room.find(FIND_MY_CREEPS);
-    const structs  = room.find(FIND_STRUCTURES) as AnyStructure[];
+    const hostiles = findCached<Creep>(room, FIND_HOSTILE_CREEPS);
+    const allies   = findCached<Creep>(room, FIND_MY_CREEPS);
+    const structs  = findCached<AnyStructure>(room, FIND_STRUCTURES);
 
     for (const tower of towers) {
         // Priority 1: attack hostiles
@@ -28,9 +31,7 @@ export function manageTowers(room: Room): void {
         }
 
         // Priority 2: heal damaged allies
-        const wounded = (allies as Creep[]).find(
-            c => c.hits / c.hitsMax < HEAL_THRESHOLD
-        );
+        const wounded = allies.find(c => c.hits / c.hitsMax < HEAL_THRESHOLD);
         if (wounded) {
             tower.heal(wounded);
             continue;
@@ -45,7 +46,16 @@ export function manageTowers(room: Room): void {
             continue;
         }
 
-        // Priority 4: repair degraded roads (only when energy plentiful)
+        // Priority 4: repair containers below 50% — they decay at 500 hits/tick without repair
+        const lowContainer = structs.find(
+            s => s.structureType === STRUCTURE_CONTAINER && s.hits < s.hitsMax * 0.5
+        );
+        if (lowContainer) {
+            tower.repair(lowContainer);
+            continue;
+        }
+
+        // Priority 5: repair degraded roads (only when energy plentiful)
         if (tower.store[RESOURCE_ENERGY] > ROAD_ENERGY_MIN) {
             const degradedRoad = structs.find(
                 s => s.structureType === STRUCTURE_ROAD && s.hits / s.hitsMax < 0.5

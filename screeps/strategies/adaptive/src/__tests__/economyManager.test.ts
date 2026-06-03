@@ -145,6 +145,32 @@ describe('calcDynamicTargets', () => {
         });
     });
 
+    describe('RC8 maintenance mode', () => {
+        it('returns 0 upgraders at RC8 when downgrade timer is healthy (>= 50k)', () => {
+            const ctrl = makeController({ level: 8, nearContainer: true, ticksToDowngrade: 100_000 });
+            const room = makeRoom({
+                controller: ctrl,
+                memory: { pidState: { output: 4, integral: 2, lastError: 0.5, lastTick: 990 } },
+            });
+            expect(calcDynamicTargets(room).upgrader).toBe(0);
+        });
+
+        it('returns 1 maintenance upgrader at RC8 when TTD < 50k', () => {
+            const ctrl = makeController({ level: 8, nearContainer: true, ticksToDowngrade: 40_000 });
+            const room = makeRoom({ controller: ctrl, memory: {} });
+            expect(calcDynamicTargets(room).upgrader).toBe(1);
+        });
+
+        it('returns 0 at RC8 even with high pidOutput and healthy timer', () => {
+            const ctrl = makeController({ level: 8, nearContainer: true, ticksToDowngrade: 190_000 });
+            const room = makeRoom({
+                controller: ctrl,
+                memory: { pidState: { output: 4, integral: 3, lastError: 1, lastTick: 990 } },
+            });
+            expect(calcDynamicTargets(room).upgrader).toBe(0);
+        });
+    });
+
     describe('scout', () => {
         it('returns 0 at RCL 0', () => {
             const ctrl = makeController({ level: 0 });

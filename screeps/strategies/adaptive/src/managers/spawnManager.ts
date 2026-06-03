@@ -6,6 +6,9 @@ import { calcDynamicTargets, EnergyLevel } from './economyManager';
 const MIN_COMBAT_ENERGY     = 400;
 const WARRIORS_PER_PLATOON  = 3;
 const DOWNGRADE_EMERGENCY_THRESHOLD = 4000;
+// RC2 has only a 10,000 tick downgrade window — the shortest of any level.
+// Fire the emergency check earlier so we have more time to spawn a replacement.
+const DOWNGRADE_EMERGENCY_RCL2 = 7000;
 // Below this threshold, non-essential roles (upgrader, scout, builder) are skipped.
 // Keeps spawn energy available for harvesters and haulers that maintain the economy.
 const SPAWN_FLOOR = 200;
@@ -52,7 +55,9 @@ export function manageSpawns(room: Room): void {
 
     // ── Emergency: controller downgrade prevention ────────────────────────────
     const ttd = room.controller?.ticksToDowngrade ?? Infinity;
-    if (ttd < DOWNGRADE_EMERGENCY_THRESHOLD && counts.upgrader === 0) {
+    const rcl = room.controller?.level ?? 0;
+    const downgradeThreshold = rcl <= 2 ? DOWNGRADE_EMERGENCY_RCL2 : DOWNGRADE_EMERGENCY_THRESHOLD;
+    if (ttd < downgradeThreshold && counts.upgrader === 0) {
         trySpawn(spawn, 'upgrader', room.energyAvailable);
         console.log(`[adaptive] ⚠️ Emergency upgrader — downgrade in ${ttd} ticks`);
         return;

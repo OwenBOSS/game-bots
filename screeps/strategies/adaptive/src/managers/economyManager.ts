@@ -184,6 +184,14 @@ export function calcDynamicTargets(room: Room): DynamicTargets {
         filter: s => s.structureType === STRUCTURE_CONTAINER,
     }).length ?? 0) > 0;
 
+    // Allow upgraders to spawn even without a controller container if a link is adjacent —
+    // at RCL5+ the controller link delivers energy directly so no container trip is needed.
+    const hasControllerLink = (room.controller?.pos.findInRange(FIND_STRUCTURES, 3, {
+        filter: s => s.structureType === STRUCTURE_LINK,
+    }).length ?? 0) > 0;
+
+    const upgraderHasLocalEnergy = hasControllerContainer || hasControllerLink;
+
     const bottleneck       = room.memory.energyStatus?.bottleneck ?? 'BALANCED';
     const h                = (room.memory.energyHistory ?? []).slice(-8);
     const avgContainerFill = avgField(h, 'containerFillPct', 50);
@@ -249,13 +257,19 @@ export function calcDynamicTargets(room: Room): DynamicTargets {
     }
 
     // ── Upgrader ──────────────────────────────────────────────────────────────
-    // PID output drives upgrader count: high energy → more upgraders (more sinks),
-    // low energy → fewer upgraders (preserve energy for spawning).
-    // Without a controller container, upgraders can't sit and drain steadily → 0.
-    const pidOutput = room.memory.pidState?.output ?? DEFAULT_PID_CONFIG.outputMid;
-    const upgrader  = hasControllerContainer
-        ? Math.max(0, Math.min(4, Math.round(pidOutput)))
-        : 0;
+    // RC8: controller is maxed — no more leveling up. Spawn 1 maintenance upgrader
+    // only when the downgrade timer is running low (< 50k of 200k ticks).
+    // All other levels: PID output drives count; high energy → more upgraders.
+    let upgrader: number;
+    if (rcl >= 8) {
+        const ttd = room.controller?.ticksToDowngrade ?? 200_000;
+        upgrader = upgraderHasLocalEnergy && ttd < 50_000 ? 1 : 0;
+    } else {
+        const pidOutput = room.memory.pidState?.output ?? DEFAULT_PID_CONFIG.outputMid;
+        upgrader = upgraderHasLocalEnergy
+            ? Math.max(0, Math.min(4, Math.round(pidOutput)))
+            : 0;
+    }
 
     const repairer  = 0; // phase override in spawnManager handles DEFEND
     const scout     = rcl >= 1 ? 1 : 0;

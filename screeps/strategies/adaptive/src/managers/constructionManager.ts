@@ -230,9 +230,13 @@ function placeTowers(room: Room, rcl: number): void {
 }
 
 // ─── Links (RCL 5+) ──────────────────────────────────────────────────────────
-// Hub link near spawn + one link per source.
-// Source links → hub link via linkManager.ts (instant transfer, 3% loss).
-// Haulers withdraw from hub link instead of walking to source containers.
+// Placement priority (strategy report §RC5):
+//   1. Source links  — adjacent to each source; harvesters push energy in
+//   2. Controller link — adjacent to controller; upgraders withdraw without traveling
+//   3. Hub link near spawn — haulers withdraw here instead of walking to containers
+//
+// With only 2 links (RC5): source + controller → upgrader throughput is maximised.
+// At 4 links (RC7): both controller + hub are present → all roles benefit.
 
 function placeLinks(room: Room, rcl: number): void {
     const built   = room.find(FIND_MY_STRUCTURES, { filter: s => s.structureType === STRUCTURE_LINK }).length;
@@ -241,30 +245,7 @@ function placeLinks(room: Room, rcl: number): void {
     let remaining = allowed - built - pending;
     if (remaining <= 0) return;
 
-    const spawn = room.find(FIND_MY_SPAWNS)[0];
-    if (!spawn) return;
-
-    // Hub link near spawn
-    const spawnLinkNearby =
-        spawn.pos.findInRange(FIND_MY_STRUCTURES, 4, { filter: s => s.structureType === STRUCTURE_LINK }).length > 0 ||
-        spawn.pos.findInRange(FIND_MY_CONSTRUCTION_SITES, 4, { filter: s => s.structureType === STRUCTURE_LINK }).length > 0;
-
-    if (!spawnLinkNearby && remaining > 0) {
-        outer:
-        for (let r = 2; r <= 5; r++) {
-            for (let dx = -r; dx <= r; dx++) {
-                for (let dy = -r; dy <= r; dy++) {
-                    if (Math.abs(dx) !== r && Math.abs(dy) !== r) continue;
-                    if (room.createConstructionSite(spawn.pos.x + dx, spawn.pos.y + dy, STRUCTURE_LINK) === OK) {
-                        remaining--;
-                        break outer;
-                    }
-                }
-            }
-        }
-    }
-
-    // Source links
+    // 1. Source links
     for (const source of room.find(FIND_SOURCES)) {
         if (remaining <= 0) break;
         const hasNearby =
@@ -279,6 +260,56 @@ function placeLinks(room: Room, rcl: number): void {
                 if (room.createConstructionSite(source.pos.x + dx, source.pos.y + dy, STRUCTURE_LINK) === OK) {
                     placed = true;
                     remaining--;
+                }
+            }
+        }
+    }
+
+    if (remaining <= 0) return;
+
+    // 2. Controller link — upgraders sit here and draw energy without making trips
+    const ctrl = room.controller;
+    if (ctrl) {
+        const hasCtrlLink =
+            ctrl.pos.findInRange(FIND_MY_STRUCTURES, 3, { filter: s => s.structureType === STRUCTURE_LINK }).length > 0 ||
+            ctrl.pos.findInRange(FIND_MY_CONSTRUCTION_SITES, 3, { filter: s => s.structureType === STRUCTURE_LINK }).length > 0;
+        if (!hasCtrlLink) {
+            outer:
+            for (let r = 1; r <= 3; r++) {
+                for (let dx = -r; dx <= r; dx++) {
+                    for (let dy = -r; dy <= r; dy++) {
+                        if (Math.abs(dx) !== r && Math.abs(dy) !== r) continue;
+                        const x = ctrl.pos.x + dx, y = ctrl.pos.y + dy;
+                        if (x < 2 || x > 47 || y < 2 || y > 47) continue;
+                        if (room.createConstructionSite(x, y, STRUCTURE_LINK) === OK) {
+                            remaining--;
+                            break outer;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if (remaining <= 0) return;
+
+    // 3. Hub link near spawn — allows haulers to withdraw locally (RC7+)
+    const spawn = room.find(FIND_MY_SPAWNS)[0];
+    if (spawn) {
+        const spawnLinkNearby =
+            spawn.pos.findInRange(FIND_MY_STRUCTURES, 4, { filter: s => s.structureType === STRUCTURE_LINK }).length > 0 ||
+            spawn.pos.findInRange(FIND_MY_CONSTRUCTION_SITES, 4, { filter: s => s.structureType === STRUCTURE_LINK }).length > 0;
+        if (!spawnLinkNearby) {
+            outer:
+            for (let r = 2; r <= 5; r++) {
+                for (let dx = -r; dx <= r; dx++) {
+                    for (let dy = -r; dy <= r; dy++) {
+                        if (Math.abs(dx) !== r && Math.abs(dy) !== r) continue;
+                        if (room.createConstructionSite(spawn.pos.x + dx, spawn.pos.y + dy, STRUCTURE_LINK) === OK) {
+                            remaining--;
+                            break outer;
+                        }
+                    }
                 }
             }
         }

@@ -1,6 +1,6 @@
 // Builder — handles construction sites (containers, extensions, tower, storage).
-// Withdraws from nearest energy source, then builds the closest construction site.
-// Retires to harvester behavior once no sites remain.
+// Collects from containers to avoid competing with harvesters at source tiles.
+// Falls back to direct harvest only when no containers have energy yet.
 
 export function runBuilder(creep: Creep): void {
     if (creep.memory.working && creep.store[RESOURCE_ENERGY] === 0) {
@@ -13,7 +13,21 @@ export function runBuilder(creep: Creep): void {
     if (creep.memory.working) {
         const site = creep.pos.findClosestByPath(FIND_CONSTRUCTION_SITES);
         if (!site) {
-            // Nothing to build — fill spawn as a fallback
+            // No construction sites — repair degraded containers and roads before idling
+            const damaged = creep.pos.findClosestByPath(FIND_STRUCTURES, {
+                filter: (s: AnyStructure) => {
+                    if (s.structureType === STRUCTURE_CONTAINER) return s.hits < s.hitsMax * 0.5;
+                    if (s.structureType === STRUCTURE_ROAD) return s.hits < s.hitsMax * 0.4;
+                    return false;
+                },
+            });
+            if (damaged) {
+                if (creep.repair(damaged as Structure) === ERR_NOT_IN_RANGE) {
+                    creep.moveTo(damaged, { reusePath: 5 });
+                }
+                return;
+            }
+            // Nothing to repair either — fill spawn
             const spawn = creep.pos.findClosestByPath(FIND_MY_STRUCTURES, {
                 filter: (s): s is StructureSpawn =>
                     s.structureType === STRUCTURE_SPAWN &&
@@ -30,11 +44,28 @@ export function runBuilder(creep: Creep): void {
             creep.moveTo(site, { reusePath: 5 });
         }
     } else {
-        const source = creep.pos.findClosestByPath(FIND_SOURCES_ACTIVE);
-        if (source) {
-            if (creep.harvest(source) === ERR_NOT_IN_RANGE) {
-                creep.moveTo(source, { reusePath: 5 });
-            }
+        collectEnergy(creep);
+    }
+}
+
+function collectEnergy(creep: Creep): void {
+    // Prefer withdrawing from a container — keeps source tiles free for harvesters
+    const container = creep.pos.findClosestByPath(FIND_STRUCTURES, {
+        filter: (s: AnyStructure) =>
+            s.structureType === STRUCTURE_CONTAINER &&
+            (s as StructureContainer).store[RESOURCE_ENERGY] >= 50,
+    }) as StructureContainer | null;
+    if (container) {
+        if (creep.withdraw(container, RESOURCE_ENERGY) === ERR_NOT_IN_RANGE) {
+            creep.moveTo(container, { reusePath: 5 });
+        }
+        return;
+    }
+    // No containers with energy yet — harvest directly as fallback
+    const source = creep.pos.findClosestByPath(FIND_SOURCES_ACTIVE);
+    if (source) {
+        if (creep.harvest(source) === ERR_NOT_IN_RANGE) {
+            creep.moveTo(source, { reusePath: 5 });
         }
     }
 }

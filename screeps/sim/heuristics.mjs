@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // Heuristic functions for Screeps strategic simulation.
-// Trade exact per-creep simulation for ~95%-accurate aggregate math over 1000-2000 tick horizons.
+// Trade exact per-creep simulation for ~95%-accurate aggregate math over long horizons.
 
 export const TICK_LIFESPAN        = 1500;   // average creep lifespan ticks
 export const SPAWN_TICKS_PER_PART = 3;      // 3 ticks to spawn one body part
@@ -8,6 +8,20 @@ export const HARVEST_PER_WORK     = 2;      // energy/tick per WORK part (harves
 export const UPGRADE_PER_WORK     = 1;      // XP/tick per WORK part (upgrade)
 export const SOURCE_REGEN_RATE    = 10;     // energy/tick per source (3000 / 300-tick cycle)
 export const CONTAINER_DISTANCE   = 10;     // approx tiles: source → container → spawn
+
+// Build costs (energy to construct one unit)
+export const EXTENSION_COST  = 3_000;
+export const CONTAINER_COST  = 5_000;
+export const ROAD_COST       = 300;
+export const TOWER_COST      = 5_000;
+export const STORAGE_COST    = 30_000;
+
+// Storage unlocks at RCL4 and adds a large energy buffer to the colony
+export const STORAGE_UNLOCK_RCL = 4;
+export const STORAGE_CAP_BONUS  = 50_000;  // practical sim buffer (not the full 1M)
+
+// Remote mining: adjacent-room source is ~50 tiles away
+export const REMOTE_MINE_DISTANCE = 50;
 
 // Controller XP needed to go from RCL N → N+1
 export const RCL_THRESHOLDS = [0, 200, 45000, 135000, 405000, 1215000, 3645000, 10935000, Infinity];
@@ -20,18 +34,22 @@ export function extensionsAtRcl(rcl) {
 }
 
 export function energyCapForRcl(rcl) {
-  return 300 + extensionsAtRcl(rcl) * 50;
+  const base    = 300 + extensionsAtRcl(rcl) * 50;
+  const storage = rcl >= STORAGE_UNLOCK_RCL ? STORAGE_CAP_BONUS : 0;
+  return base + storage;
 }
 
-// Typical body composition per role (mid-game, ~RCL2-3 budget)
+// Typical body composition per role
 export const ROLE_SPEC = {
-  harvester: { parts: 5, workParts: 2, cost: 300 },
-  hauler:    { parts: 4, carryParts: 2, carryCapacity: 100, cost: 200 },
-  upgrader:  { parts: 3, workParts: 1, cost: 200 },
-  builder:   { parts: 3, workParts: 1, cost: 200 },
-  warrior:   { parts: 5, attackParts: 2, cost: 260 },
-  scout:     { parts: 1, cost: 50 },
-  scavenger: { parts: 3, carryParts: 2, cost: 150 },
+  harvester:   { parts: 5, workParts: 2,  cost: 300 },
+  hauler:      { parts: 4, carryParts: 2, carryCapacity: 100, cost: 200 },
+  upgrader:    { parts: 3, workParts: 1,  cost: 200 },
+  builder:     { parts: 3, workParts: 1,  cost: 200 },
+  warrior:     { parts: 5, attackParts: 2, cost: 260 },
+  scout:       { parts: 1, cost: 50 },
+  scavenger:   { parts: 3, carryParts: 2, cost: 150 },
+  remoteMiner: { parts: 7, workParts: 6,  cost: 800 },   // heavy miner for adjacent rooms
+  courier:     { parts: 9, carryParts: 8, carryCapacity: 400, cost: 550 },  // long-haul hauler
 };
 
 // ─── Movement ────────────────────────────────────────────────────────────────
@@ -45,25 +63,39 @@ export function moveTicks(distance, hasRoads = false) {
 // Gross energy harvested per tick. With containers, harvesters park and harvest continuously.
 export function energyIncome(harvesterCount, sourceCount, hasContainers) {
   if (!hasContainers) {
-    return harvesterCount * HARVEST_PER_WORK; // no parking: roughly 1 WORK part effective
+    return harvesterCount * HARVEST_PER_WORK;
   }
-  // 2 WORK parts × 2 e/part = 4 e/tick per harvester, capped by source regen
   const perHarvesterOutput = HARVEST_PER_WORK * 2;
-  const activeHarvesters = Math.min(harvesterCount, sourceCount);
+  const activeHarvesters   = Math.min(harvesterCount, sourceCount);
   return Math.min(sourceCount * SOURCE_REGEN_RATE, activeHarvesters * perHarvesterOutput);
 }
 
 // Energy delivered to spawn/storage by haulers per tick
 export function haulerThroughput(haulerCount, containerDistance, hasRoads) {
-  const carry = ROLE_SPEC.hauler.carryCapacity;
+  const carry     = ROLE_SPEC.hauler.carryCapacity;
   const roundTrip = 2 * moveTicks(containerDistance, hasRoads);
   return (haulerCount * carry) / roundTrip;
+}
+
+// Remote mining income from adjacent rooms (6 WORK parts, reduced efficiency for distance)
+export function remoteIncome(remoteMinerCount, remoteRooms, hasRoads) {
+  if (!remoteMinerCount || !remoteRooms) return 0;
+  const activeMiners = Math.min(remoteMinerCount, remoteRooms * 2);
+  const perMiner     = HARVEST_PER_WORK * 6 * 0.85;  // 85% efficiency (pathing loss)
+  return activeMiners * perMiner;
+}
+
+// Courier delivery from remote rooms per tick
+export function courierThroughput(courierCount, hasRoads) {
+  const carry     = ROLE_SPEC.courier.carryCapacity;
+  const roundTrip = 2 * moveTicks(REMOTE_MINE_DISTANCE, hasRoads);
+  return (courierCount * carry) / roundTrip;
 }
 
 // Energy consumed per tick by upgraders and builders
 export function energyDrain(upgraderCount, builderCount, buildActive) {
   const upgradeCost = upgraderCount * UPGRADE_PER_WORK;
-  const buildCost   = buildActive ? builderCount * 5 : 0; // 1 WORK × 5 build power
+  const buildCost   = buildActive ? builderCount * 5 : 0;
   return upgradeCost + buildCost;
 }
 
@@ -87,12 +119,12 @@ export function siegeViability(warriors, defenderHp = 20000) {
 // ─── State assessment ────────────────────────────────────────────────────────
 
 export function detectBottleneck(s) {
-  const containers  = s.structs?.containers ?? 0;
-  const roads       = s.structs?.roads ?? 0;
-  const income      = energyIncome(s.creeps?.harvester ?? 0, 2, containers > 0);
-  const throughput  = haulerThroughput(s.creeps?.hauler ?? 0, CONTAINER_DISTANCE, roads > 4);
-  if (income < 5)              return 'HARVESTER_SHORTAGE';
-  if (throughput < income * 0.7) return 'HAULER_SHORTAGE';
+  const containers = s.structs?.containers ?? 0;
+  const roads      = s.structs?.roads ?? 0;
+  const income     = energyIncome(s.creeps?.harvester ?? 0, 2, containers > 0);
+  const throughput = haulerThroughput(s.creeps?.hauler ?? 0, CONTAINER_DISTANCE, roads > 4);
+  if (income < 5)                      return 'HARVESTER_SHORTAGE';
+  if (throughput < income * 0.7)       return 'HAULER_SHORTAGE';
   if (income >= SOURCE_REGEN_RATE * 2) return 'SOURCE_MAXED';
   return 'BALANCED';
 }
@@ -108,31 +140,29 @@ export function evaluatePhase(s, currentPhase) {
   return currentPhase;
 }
 
-// XP per tick generated by upgraders (1 WORK part = 1 XP/tick)
 export function upgradeFlux(upgraderCount) {
   return upgraderCount * UPGRADE_PER_WORK;
 }
 
-// Build energy consumed per tick by builders (1 WORK part = 5 build power)
 export function buildFlux(builderCount) {
   return builderCount * 5;
 }
 
-// Composite score for a finished simulation run (used for build-order ranking)
+// Composite score for a finished simulation run (used for build-order ranking).
+// Quadratic RCL reward makes high-RCL runs clearly preferred in long-horizon comparisons.
 export function scoreRun(snapshots) {
   if (!snapshots.length) return 0;
   const last = snapshots.at(-1);
 
-  // RCL progress: reward reaching higher RCL, bonus for being mid-level within it
-  const rclScore = (last.rcl - 2) * 20 + (last.ctrl?.pct ?? 0) * 0.5;
+  const rclScore = Math.pow(Math.max(0, last.rcl - 2), 1.5) * 25 + (last.ctrl?.pct ?? 0) * 0.3;
 
-  // Energy stability: fraction of ticks with energy > 25% capacity
-  const stableCount = snapshots.filter(s => (s.energy?.avail ?? 0) > (s.energy?.cap ?? 300) * 0.25).length;
-  const stabilityScore = stableCount / snapshots.length * 30;
+  const stableCount    = snapshots.filter(s => (s.energy?.avail ?? 0) > (s.energy?.cap ?? 300) * 0.25).length;
+  const stabilityScore = (stableCount / snapshots.length) * 20;
 
-  // Creep roster score: reward having a productive army
-  const creeps = last.creeps ?? {};
-  const rosterScore = Math.min(10, Object.values(creeps).reduce((a, b) => a + b, 0) * 0.5);
+  const creeps     = last.creeps ?? {};
+  const rosterScore = Math.min(15, Object.values(creeps).reduce((a, b) => a + b, 0) * 0.3);
 
-  return rclScore + stabilityScore + rosterScore;
+  const remoteScore = Math.min(10, (last.structs?.remoteRooms ?? 0) * 5);
+
+  return rclScore + stabilityScore + rosterScore + remoteScore;
 }

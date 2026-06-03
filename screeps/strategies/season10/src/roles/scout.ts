@@ -29,14 +29,10 @@ function pickTarget(creep: Creep): string | null {
     const unexplored = adjacent.filter(r => !known.includes(r));
     if (unexplored.length > 0) return unexplored[0];
 
-    // All adjacent known — revisit the one with the oldest scoreMap scan
+    // All adjacent known — revisit the room with the oldest (or absent) scoreMap entry.
+    // Rooms never seen in scoreMap get tick=0 and are prioritised for revisit.
     const scoreMap = Memory.scoreMap ?? {};
-    const withData = adjacent
-        .filter(r => scoreMap[r] !== undefined)
-        .sort((a, b) => (scoreMap[a]?.tick ?? 0) - (scoreMap[b]?.tick ?? 0));
-
-    if (withData.length > 0) return withData[0];
-
-    // Fallback: just pick first adjacent
-    return adjacent[0] ?? null;
+    return adjacent.sort((a, b) =>
+        (scoreMap[a]?.tick ?? 0) - (scoreMap[b]?.tick ?? 0)
+    )[0] ?? null;
 }

@@ -48,21 +48,20 @@ declare global {
         targetRoom?: string;
         targetScoreId?: string | null;
         homeRoom?: string;
+        sourceId?: string;
     }
 
     // Per-room memory fields for Season 10
     interface RoomMemory {
         rcLevel?: number;
         spawnScoutNext?: boolean;
-        firstCollectorBeforeReserver?: boolean;
         collectorQuota?: number;
-        scanCacheEnabled?: boolean;
         dynamicCollectorQuota?: boolean;
-        collectorsAboveUpgraders?: boolean;
         observerEnabled?: boolean;
         containerSitesPlaced?: boolean;
         towerSitePlaced?: boolean;
         storageSitePlaced?: boolean;
+        roadSitesPlaced?: boolean;
     }
 
     interface Memory {

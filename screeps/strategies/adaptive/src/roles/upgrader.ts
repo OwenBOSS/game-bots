@@ -49,7 +49,21 @@ function getEnergy(creep: Creep): void {
     const controller = creep.room.controller;
     if (!controller) return;
 
-    // Prefer container near controller (most efficient for upgrader)
+    // Controller link (range 3): energy teleported from sources — no hauler trip.
+    // This is the most efficient source at RCL5+ with the new link topology.
+    const ctrlLink = controller.pos.findInRange(FIND_MY_STRUCTURES, 3, {
+        filter: s =>
+            s.structureType === STRUCTURE_LINK &&
+            (s as StructureLink).store[RESOURCE_ENERGY] > 0,
+    })[0] as StructureLink | undefined;
+    if (ctrlLink) {
+        if (creep.withdraw(ctrlLink, RESOURCE_ENERGY) === ERR_NOT_IN_RANGE) {
+            creep.moveTo(ctrlLink, { reusePath: 5 });
+        }
+        return;
+    }
+
+    // Container near controller (fallback when link is empty or not yet built)
     const container = controller.pos.findInRange(FIND_STRUCTURES, 3, {
         filter: s =>
             s.structureType === STRUCTURE_CONTAINER &&

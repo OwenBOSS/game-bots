@@ -1,3 +1,10 @@
+import { beforeEach } from 'vitest';
+import { resetTickCache } from '../utils/tickCache';
+
+// Clear the per-tick find() cache before every test so cached find() results
+// from one test don't bleed into the next.
+beforeEach(() => resetTickCache());
+
 // Screeps runtime globals — injected by the game engine, mocked here for tests.
 
 // Body part constants
@@ -35,7 +42,10 @@
 (global as any).FIND_SCORES             = 10031; // Season 10
 
 // Look constants
-(global as any).LOOK_SCORE = 'score';
+(global as any).LOOK_SCORE               = 'score';
+(global as any).LOOK_TERRAIN             = 'terrain';
+(global as any).LOOK_STRUCTURES          = 'structures';
+(global as any).LOOK_CONSTRUCTION_SITES  = 'constructionSites';
 
 // Season 10 constants
 (global as any).SCORE_SPAWN_CHANCE          = 0.01;

@@ -57,10 +57,16 @@ function workerBody(budget: number): BodyPartConstant[] | null {
     return [...r(WORK, units), ...r(CARRY, units), ...r(MOVE, units)];
 }
 
-// Reserver: CLAIM (600e) + extra MOVE for fast travel to adjacent rooms.
-// One CLAIM part adds 600 ticks per reserveController() call (cap 5000t).
+// Reserver: CLAIM + MOVE for fast travel to adjacent rooms.
+// 1 CLAIM part: net 0/tick (reserves +1, decay -1 = holds flat).
+// 2 CLAIM parts: net +1/tick (reserves +2, decay -1 = builds buffer). Use when affordable.
 function reserverBody(budget: number): BodyPartConstant[] | null {
     if (budget < 650) return null;
+    if (budget >= 1300) {
+        // 2-CLAIM body: actively builds the reservation buffer instead of just holding it flat.
+        const extraMoves = Math.min(Math.floor((budget - 1300) / 50), 4);
+        return [CLAIM, CLAIM, ...r(MOVE, 2 + extraMoves)];
+    }
     const extraMoves = Math.min(Math.floor((budget - 650) / 50), 4);
     return [CLAIM, ...r(MOVE, 1 + extraMoves)];
 }

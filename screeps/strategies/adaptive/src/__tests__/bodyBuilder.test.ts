@@ -179,13 +179,30 @@ describe('buildBody', () => {
             expect(buildBody('reserver', 649)).toBeNull();
         });
 
-        it('returns [CLAIM, MOVE] at 650e', () => {
+        it('returns [CLAIM, MOVE] at 650e (1-CLAIM: holds reservation flat)', () => {
             expect(buildBody('reserver', 650)).toEqual([CL, M]);
         });
 
-        it('adds extra MOVE with budget headroom', () => {
+        it('adds extra MOVE in 1-CLAIM range (650–1299e)', () => {
             const body = buildBody('reserver', 750)!;
+            expect(body.filter(p => p === CL)).toHaveLength(1);
             expect(body.filter(p => p === M).length).toBeGreaterThan(1);
+        });
+
+        it('returns [CLAIM, CLAIM, MOVE, MOVE] at 1300e (2-CLAIM: net +1/tick reservation)', () => {
+            expect(buildBody('reserver', 1300)).toEqual([CL, CL, M, M]);
+        });
+
+        it('adds extra MOVE at 1300e+', () => {
+            const body = buildBody('reserver', 1350)!;
+            expect(body.filter(p => p === CL)).toHaveLength(2);
+            expect(body.filter(p => p === M).length).toBeGreaterThan(2);
+        });
+
+        it('caps at 2 CLAIM and 6 MOVE with large budget', () => {
+            const body = buildBody('reserver', 10_000)!;
+            expect(body.filter(p => p === CL)).toHaveLength(2);
+            expect(body.filter(p => p === M)).toHaveLength(6);
         });
     });
 

@@ -73,12 +73,6 @@ describe('checkRCTransition — RC2 entry', () => {
         checkRCTransition(room);
         expect((global as any).Memory.scoreCache).toBeDefined();
     });
-
-    it('sets firstCollectorBeforeReserver = true', () => {
-        const room = makeRCRoom(2, 1);
-        checkRCTransition(room);
-        expect(room.memory.firstCollectorBeforeReserver).toBe(true);
-    });
 });
 
 describe('checkRCTransition — RC3 entry', () => {
@@ -95,10 +89,10 @@ describe('checkRCTransition — RC3 entry', () => {
         expect(room.memory.collectorQuota).toBe(3);
     });
 
-    it('sets scanCacheEnabled = true', () => {
+    it('sets rcLevel to 3', () => {
         const room = makeRCRoom(3, 2);
         checkRCTransition(room);
-        expect(room.memory.scanCacheEnabled).toBe(true);
+        expect(room.memory.rcLevel).toBe(3);
     });
 });
 
@@ -125,10 +119,10 @@ describe('checkRCTransition — RC5 entry', () => {
         };
     });
 
-    it('sets collectorsAboveUpgraders = true', () => {
+    it('sets rcLevel to 5', () => {
         const room = makeRCRoom(5, 4);
         checkRCTransition(room);
-        expect(room.memory.collectorsAboveUpgraders).toBe(true);
+        expect(room.memory.rcLevel).toBe(5);
     });
 });
 

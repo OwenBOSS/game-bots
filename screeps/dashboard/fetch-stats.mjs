@@ -80,11 +80,11 @@ if (roomLayout && typeof roomLayout === 'object' && Object.keys(roomLayout).leng
 }
 
 // ── Run Monte Carlo simulation ──────────────────────────────────────────────
-console.log('Running Monte Carlo simulation (200 runs × 4 strategies)...');
+console.log('Running Monte Carlo simulation (200 runs × 8 strategies)...');
 let simData = null;
 try {
   simData = await runSim({ historyPath: HISTORY, silent: true });
-  if (simData) console.log(`Simulation complete — RCL3 probability: ${Math.round(simData.milestones.rcl3.probWithin2000t * 100)}%`);
+  if (simData) console.log(`Simulation complete — RCL4 probability: ${Math.round((simData.milestones.rcl4?.probWithinHorizon ?? 0) * 100)}%`);
 } catch (e) {
   console.warn('Simulation failed (historical dashboard only):', e.message);
 }
@@ -148,10 +148,10 @@ function buildDashboard(snapshots, simData = null, accuracy = null, roomLayout =
 
   // ── Simulation section HTML ─────────────────────────────────────────────
   const simRunInfo = simData
-    ? `Monte Carlo · ${simData.runs} runs × 4 strategies · +${simData.ticksForward.toLocaleString()} ticks from tick ${simData.baseTick.toLocaleString()}`
+    ? `Monte Carlo · ${simData.runs} runs × ${simData.buildOrders?.length ?? 8} strategies · +${simData.ticksForward.toLocaleString()} ticks from tick ${simData.baseTick.toLocaleString()}`
     : 'Not available — run: just fetch-stats';
 
-  const rcl3Pct   = simData ? Math.round(simData.milestones.rcl3.probWithin2000t * 100) : null;
+  const rcl4Pct   = simData ? Math.round((simData.milestones.rcl4?.probWithinHorizon ?? 0) * 100) : null;
   const crisisPct = simData ? Math.round(simData.milestones.energyCrisisRate * 100) : null;
 
   const gaugeColor = (pct, goodIsHigh) => {
@@ -171,7 +171,7 @@ function buildDashboard(snapshots, simData = null, accuracy = null, roomLayout =
 
   const milestonesHtml = simData
     ? `<div style="display:flex;gap:12px;flex-wrap:wrap">
-        ${gauge('P(RCL3 in 2000t)', rcl3Pct, true)}
+        ${gauge('P(RCL4 in 24h)', rcl4Pct, true)}
         ${gauge('Energy Crisis Rate', crisisPct, false)}
       </div>`
     : '<p style="color:#8b949e;font-size:.8em">Run fetch-stats to generate</p>';
@@ -669,9 +669,9 @@ if (SIM) {
     data: {
       labels: SIM.buildOrders.map(b => b.label),
       datasets: [
-        { label: 'Ctrl % at t+2000',    data: SIM.buildOrders.map(b => b.ctrlPctAt2000),               backgroundColor: boColors[0] + 'bb' },
-        { label: 'Energy Stability %',  data: SIM.buildOrders.map(b => Math.round(b.stabilityScore * 100)), backgroundColor: boColors[1] + 'bb' },
-        { label: 'P(RCL3 in 2000t) %', data: SIM.buildOrders.map(b => Math.round(b.rcl3Prob * 100)),   backgroundColor: boColors[2] + 'bb' },
+        { label: 'Ctrl % at 24h',      data: SIM.buildOrders.map(b => b.ctrlPctAtEnd),                 backgroundColor: boColors[0] + 'bb' },
+        { label: 'Energy Stability %', data: SIM.buildOrders.map(b => Math.round(b.stabilityScore * 100)), backgroundColor: boColors[1] + 'bb' },
+        { label: 'P(RCL4 in 24h) %',  data: SIM.buildOrders.map(b => Math.round(b.rcl4Prob * 100)),    backgroundColor: boColors[2] + 'bb' },
       ],
     },
     options: {

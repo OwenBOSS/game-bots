@@ -6,6 +6,7 @@ import { manageConstruction } from './managers/constructionManager';
 import { manageTowers } from './managers/towerManager';
 import { runObserver } from './managers/observerManager';
 import { runHarvester } from './roles/harvester';
+import { runHauler } from './roles/hauler';
 import { runCollector } from './roles/collector';
 import { runScout } from './roles/scout';
 import { runBuilder } from './roles/builder';
@@ -56,6 +57,7 @@ export function loop(): void {
         const creep = Game.creeps[name];
         switch (creep.memory.role) {
             case 'harvester': runHarvester(creep); break;
+            case 'hauler':    runHauler(creep);    break;
             case 'collector': runCollector(creep); break;
             case 'scout':     runScout(creep);     break;
             case 'builder':   runBuilder(creep);   break;

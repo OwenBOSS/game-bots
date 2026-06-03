@@ -97,11 +97,17 @@ function deliverRemote(creep: Creep): void {
 // ─── Normal mode ──────────────────────────────────────────────────────────────
 
 function collect(creep: Creep): void {
-    // 1. Hub links — energy teleported from sources, no travel needed
+    // 1. Hub links (near spawn) — skip controller-adjacent links; those serve upgraders.
+    // Controller links are within range 3 of the controller; exclude them here so
+    // haulers don't drain energy meant for stationary upgraders.
+    const roomCtrl = creep.room.controller;
     const link = creep.pos.findClosestByPath(FIND_MY_STRUCTURES, {
-        filter: s =>
-            s.structureType === STRUCTURE_LINK &&
-            (s as StructureLink).store[RESOURCE_ENERGY] >= 400,
+        filter: s => {
+            if (s.structureType !== STRUCTURE_LINK) return false;
+            if ((s as StructureLink).store[RESOURCE_ENERGY] < 400) return false;
+            if (roomCtrl && roomCtrl.pos.getRangeTo(s) <= 3) return false;
+            return true;
+        },
     }) as StructureLink | null;
     if (link) {
         if (creep.withdraw(link, RESOURCE_ENERGY) === ERR_NOT_IN_RANGE) {

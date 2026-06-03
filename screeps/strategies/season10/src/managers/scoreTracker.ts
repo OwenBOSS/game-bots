@@ -17,6 +17,7 @@ export function trackScores(room: Room): void {
     }
 
     if (!shouldScanThisTick()) return;
+    if (typeof FIND_SCORES === 'undefined') return;
 
     // Purge expired cache entries
     for (const id in Memory.scoreCache) {

@@ -65,11 +65,29 @@ describe('runScout — target selection', () => {
         expect(['W1N0', 'W0N1']).toContain(targetRoom);
     });
 
-    it('when all adjacent rooms known, moves toward room with oldest scoreMap entry', () => {
+    it('when all adjacent rooms known, prefers rooms absent from scoreMap (tick=0) over stale entries', () => {
         (global as any).Memory.knownRooms = ['W1N1', 'W1N2', 'W2N1', 'W1N0', 'W0N1'];
         (global as any).Memory.scoreMap = {
-            'W1N2': { score: 5, tick: 500 }, // oldest
+            'W1N2': { score: 5, tick: 500 },
             'W2N1': { score: 5, tick: 900 },
+            // W1N0 and W0N1 never in scoreMap — treated as tick=0, highest priority
+        };
+        (global as any).Game.map.describeExits.mockReturnValue({
+            1: 'W1N2', 3: 'W2N1', 5: 'W1N0', 7: 'W0N1',
+        });
+        const creep = makeScoutCreep('W1N1');
+        runScout(creep);
+        const target = creep.room.findExitTo.mock.calls[0][0];
+        expect(['W1N0', 'W0N1']).toContain(target);
+    });
+
+    it('when all adjacent rooms are in scoreMap, picks the room with the oldest tick', () => {
+        (global as any).Memory.knownRooms = ['W1N1', 'W1N2', 'W2N1', 'W1N0', 'W0N1'];
+        (global as any).Memory.scoreMap = {
+            'W1N2': { score: 5, tick: 500 }, // oldest → should be chosen
+            'W2N1': { score: 5, tick: 900 },
+            'W1N0': { score: 5, tick: 800 },
+            'W0N1': { score: 5, tick: 600 },
         };
         (global as any).Game.map.describeExits.mockReturnValue({
             1: 'W1N2', 3: 'W2N1', 5: 'W1N0', 7: 'W0N1',

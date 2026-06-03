@@ -235,10 +235,20 @@ function deliverRemote(creep) {
 }
 // ─── Normal mode ──────────────────────────────────────────────────────────────
 function collect$1(creep) {
-    // 1. Hub links — energy teleported from sources, no travel needed
+    // 1. Hub links (near spawn) — skip controller-adjacent links; those serve upgraders.
+    // Controller links are within range 3 of the controller; exclude them here so
+    // haulers don't drain energy meant for stationary upgraders.
+    const roomCtrl = creep.room.controller;
     const link = creep.pos.findClosestByPath(FIND_MY_STRUCTURES, {
-        filter: s => s.structureType === STRUCTURE_LINK &&
-            s.store[RESOURCE_ENERGY] >= 400,
+        filter: s => {
+            if (s.structureType !== STRUCTURE_LINK)
+                return false;
+            if (s.store[RESOURCE_ENERGY] < 400)
+                return false;
+            if (roomCtrl && roomCtrl.pos.getRangeTo(s) <= 3)
+                return false;
+            return true;
+        },
     });
     if (link) {
         if (creep.withdraw(link, RESOURCE_ENERGY) === ERR_NOT_IN_RANGE) {
@@ -454,7 +464,19 @@ function getEnergy$1(creep) {
     const controller = creep.room.controller;
     if (!controller)
         return;
-    // Prefer container near controller (most efficient for upgrader)
+    // Controller link (range 3): energy teleported from sources — no hauler trip.
+    // This is the most efficient source at RCL5+ with the new link topology.
+    const ctrlLink = controller.pos.findInRange(FIND_MY_STRUCTURES, 3, {
+        filter: s => s.structureType === STRUCTURE_LINK &&
+            s.store[RESOURCE_ENERGY] > 0,
+    })[0];
+    if (ctrlLink) {
+        if (creep.withdraw(ctrlLink, RESOURCE_ENERGY) === ERR_NOT_IN_RANGE) {
+            creep.moveTo(ctrlLink, { reusePath: 5 });
+        }
+        return;
+    }
+    // Container near controller (fallback when link is empty or not yet built)
     const container = controller.pos.findInRange(FIND_STRUCTURES, 3, {
         filter: s => s.structureType === STRUCTURE_CONTAINER &&
             s.store[RESOURCE_ENERGY] > 0,
@@ -1913,11 +1935,17 @@ function workerBody(budget) {
     const units = Math.min(Math.floor(budget / 200), 8);
     return [...r(WORK, units), ...r(CARRY, units), ...r(MOVE, units)];
 }
-// Reserver: CLAIM (600e) + extra MOVE for fast travel to adjacent rooms.
-// One CLAIM part adds 600 ticks per reserveController() call (cap 5000t).
+// Reserver: CLAIM + MOVE for fast travel to adjacent rooms.
+// 1 CLAIM part: net 0/tick (reserves +1, decay -1 = holds flat).
+// 2 CLAIM parts: net +1/tick (reserves +2, decay -1 = builds buffer). Use when affordable.
 function reserverBody(budget) {
     if (budget < 650)
         return null;
+    if (budget >= 1300) {
+        // 2-CLAIM body: actively builds the reservation buffer instead of just holding it flat.
+        const extraMoves = Math.min(Math.floor((budget - 1300) / 50), 4);
+        return [CLAIM, CLAIM, ...r(MOVE, 2 + extraMoves)];
+    }
     const extraMoves = Math.min(Math.floor((budget - 650) / 50), 4);
     return [CLAIM, ...r(MOVE, 1 + extraMoves)];
 }
@@ -2286,7 +2314,7 @@ function detectBottleneck(status, room) {
     return 'BALANCED';
 }
 function calcDynamicTargets(room) {
-    var _a, _b, _c, _d, _e, _f, _g, _h, _j;
+    var _a, _b, _c, _d, _e, _f, _g, _h, _j, _k, _l, _m, _o;
     const rcl = (_b = (_a = room.controller) === null || _a === void 0 ? void 0 : _a.level) !== null && _b !== void 0 ? _b : 0;
     const sources = room.find(FIND_SOURCES);
     const sites = room.find(FIND_CONSTRUCTION_SITES).length;
@@ -2296,8 +2324,14 @@ function calcDynamicTargets(room) {
     const hasControllerContainer = ((_d = (_c = room.controller) === null || _c === void 0 ? void 0 : _c.pos.findInRange(FIND_STRUCTURES, 3, {
         filter: s => s.structureType === STRUCTURE_CONTAINER,
     }).length) !== null && _d !== void 0 ? _d : 0) > 0;
-    const bottleneck = (_f = (_e = room.memory.energyStatus) === null || _e === void 0 ? void 0 : _e.bottleneck) !== null && _f !== void 0 ? _f : 'BALANCED';
-    const h = ((_g = room.memory.energyHistory) !== null && _g !== void 0 ? _g : []).slice(-8);
+    // Allow upgraders to spawn even without a controller container if a link is adjacent —
+    // at RCL5+ the controller link delivers energy directly so no container trip is needed.
+    const hasControllerLink = ((_f = (_e = room.controller) === null || _e === void 0 ? void 0 : _e.pos.findInRange(FIND_STRUCTURES, 3, {
+        filter: s => s.structureType === STRUCTURE_LINK,
+    }).length) !== null && _f !== void 0 ? _f : 0) > 0;
+    const upgraderHasLocalEnergy = hasControllerContainer || hasControllerLink;
+    const bottleneck = (_h = (_g = room.memory.energyStatus) === null || _g === void 0 ? void 0 : _g.bottleneck) !== null && _h !== void 0 ? _h : 'BALANCED';
+    const h = ((_j = room.memory.energyHistory) !== null && _j !== void 0 ? _j : []).slice(-8);
     const avgContainerFill = avgField(h, 'containerFillPct', 50);
     // ── Harvesters ────────────────────────────────────────────────────────────
     // Bootstrap (no source containers yet): small mobile harvesters act as
@@ -2353,13 +2387,20 @@ function calcDynamicTargets(room) {
         builder = avgContainerFill < 25 ? Math.max(1, Math.ceil(baseBuilders / 2)) : baseBuilders;
     }
     // ── Upgrader ──────────────────────────────────────────────────────────────
-    // PID output drives upgrader count: high energy → more upgraders (more sinks),
-    // low energy → fewer upgraders (preserve energy for spawning).
-    // Without a controller container, upgraders can't sit and drain steadily → 0.
-    const pidOutput = (_j = (_h = room.memory.pidState) === null || _h === void 0 ? void 0 : _h.output) !== null && _j !== void 0 ? _j : DEFAULT_PID_CONFIG.outputMid;
-    const upgrader = hasControllerContainer
-        ? Math.max(0, Math.min(4, Math.round(pidOutput)))
-        : 0;
+    // RC8: controller is maxed — no more leveling up. Spawn 1 maintenance upgrader
+    // only when the downgrade timer is running low (< 50k of 200k ticks).
+    // All other levels: PID output drives count; high energy → more upgraders.
+    let upgrader;
+    if (rcl >= 8) {
+        const ttd = (_l = (_k = room.controller) === null || _k === void 0 ? void 0 : _k.ticksToDowngrade) !== null && _l !== void 0 ? _l : 200000;
+        upgrader = upgraderHasLocalEnergy && ttd < 50000 ? 1 : 0;
+    }
+    else {
+        const pidOutput = (_o = (_m = room.memory.pidState) === null || _m === void 0 ? void 0 : _m.output) !== null && _o !== void 0 ? _o : DEFAULT_PID_CONFIG.outputMid;
+        upgrader = upgraderHasLocalEnergy
+            ? Math.max(0, Math.min(4, Math.round(pidOutput)))
+            : 0;
+    }
     const repairer = 0; // phase override in spawnManager handles DEFEND
     const scout = rcl >= 1 ? 1 : 0;
     // 1 scavenger once containers exist (supply chain is up, loot prevention matters)
@@ -2422,6 +2463,9 @@ function walkableAround(source) {
 const MIN_COMBAT_ENERGY = 400;
 const WARRIORS_PER_PLATOON = 3;
 const DOWNGRADE_EMERGENCY_THRESHOLD = 4000;
+// RC2 has only a 10,000 tick downgrade window — the shortest of any level.
+// Fire the emergency check earlier so we have more time to spawn a replacement.
+const DOWNGRADE_EMERGENCY_RCL2 = 7000;
 // Below this threshold, non-essential roles (upgrader, scout, builder) are skipped.
 // Keeps spawn energy available for harvesters and haulers that maintain the economy.
 const SPAWN_FLOOR = 200;
@@ -2433,7 +2477,7 @@ const COMBAT_TARGETS = {
     DEFEND: { warrior: 4, ranger: 2, healer: 2, repairer: 2 },
 };
 function manageSpawns(room) {
-    var _a, _b, _c, _d, _e, _f, _g, _h, _j, _k, _l, _m, _o, _p, _q, _r, _s, _t, _u, _v, _w;
+    var _a, _b, _c, _d, _e, _f, _g, _h, _j, _k, _l, _m, _o, _p, _q, _r, _s, _t, _u, _v, _w, _x, _y;
     const spawns = room.find(FIND_MY_SPAWNS).filter(s => !s.spawning);
     if (spawns.length === 0)
         return;
@@ -2469,7 +2513,9 @@ function manageSpawns(room) {
     }
     // ── Emergency: controller downgrade prevention ────────────────────────────
     const ttd = (_f = (_e = room.controller) === null || _e === void 0 ? void 0 : _e.ticksToDowngrade) !== null && _f !== void 0 ? _f : Infinity;
-    if (ttd < DOWNGRADE_EMERGENCY_THRESHOLD && counts.upgrader === 0) {
+    const rcl = (_h = (_g = room.controller) === null || _g === void 0 ? void 0 : _g.level) !== null && _h !== void 0 ? _h : 0;
+    const downgradeThreshold = rcl <= 2 ? DOWNGRADE_EMERGENCY_RCL2 : DOWNGRADE_EMERGENCY_THRESHOLD;
+    if (ttd < downgradeThreshold && counts.upgrader === 0) {
         trySpawn(spawn, 'upgrader', room.energyAvailable);
         console.log(`[adaptive] ⚠️ Emergency upgrader — downgrade in ${ttd} ticks`);
         return;
@@ -2480,21 +2526,21 @@ function manageSpawns(room) {
         return;
     }
     // ── Local defense: room under active attack → spawn defenders before eco ─
-    const localThreat = ((_h = (_g = Memory.roomThreats) === null || _g === void 0 ? void 0 : _g[room.name]) === null || _h === void 0 ? void 0 : _h.severity) === 'ACTIVE';
+    const localThreat = ((_k = (_j = Memory.roomThreats) === null || _j === void 0 ? void 0 : _j[room.name]) === null || _k === void 0 ? void 0 : _k.severity) === 'ACTIVE';
     if (localThreat && !inSafeMode && room.energyAvailable >= MIN_COMBAT_ENERGY) {
-        if (((_j = counts.repairer) !== null && _j !== void 0 ? _j : 0) < 2) {
+        if (((_l = counts.repairer) !== null && _l !== void 0 ? _l : 0) < 2) {
             trySpawn(spawn, 'repairer', room.energyAvailable);
             return;
         }
-        if (((_k = counts.warrior) !== null && _k !== void 0 ? _k : 0) < 4) {
+        if (((_m = counts.warrior) !== null && _m !== void 0 ? _m : 0) < 4) {
             trySpawn(spawn, 'warrior', room.energyAvailable, { platoonId: assignWarriorPlatoon(creeps) });
             return;
         }
-        if (((_l = counts.ranger) !== null && _l !== void 0 ? _l : 0) < 2) {
+        if (((_o = counts.ranger) !== null && _o !== void 0 ? _o : 0) < 2) {
             trySpawn(spawn, 'ranger', room.energyAvailable, { platoonId: assignWarriorPlatoon(creeps) });
             return;
         }
-        if (((_m = counts.healer) !== null && _m !== void 0 ? _m : 0) < 1) {
+        if (((_p = counts.healer) !== null && _p !== void 0 ? _p : 0) < 1) {
             const pid = assignHealerPlatoon(creeps);
             if (pid) {
                 trySpawn(spawn, 'healer', room.energyAvailable, { platoonId: pid });
@@ -2532,7 +2578,7 @@ function manageSpawns(room) {
                 continue;
             if (needsFloor && room.energyAvailable < SPAWN_FLOOR)
                 continue;
-            if (((_o = counts[role]) !== null && _o !== void 0 ? _o : 0) < target) {
+            if (((_q = counts[role]) !== null && _q !== void 0 ? _q : 0) < target) {
                 const budget = role === 'hauler' ? haulerBudget : room.energyAvailable;
                 trySpawn(spawn, role, budget, extra);
                 return;
@@ -2541,10 +2587,10 @@ function manageSpawns(room) {
     }
     // ── Remote mining: reservers + remote miners + remote haulers ─────────────
     if (canSpawnEconomy) {
-        for (const [remoteName, rt] of Object.entries((_p = room.memory.remoteRooms) !== null && _p !== void 0 ? _p : {})) {
+        for (const [remoteName, rt] of Object.entries((_r = room.memory.remoteRooms) !== null && _r !== void 0 ? _r : {})) {
             // Skip rooms where hostile creeps were spotted recently — sending
             // miners/haulers there wastes spawn energy until it clears.
-            const remoteIntel = (_q = Memory.roomIntel) === null || _q === void 0 ? void 0 : _q[remoteName];
+            const remoteIntel = (_s = Memory.roomIntel) === null || _s === void 0 ? void 0 : _s[remoteName];
             const threatened = remoteIntel && remoteIntel.enemyCreeps > 0 &&
                 Game.time - remoteIntel.scannedAt < 300;
             if (threatened)
@@ -2584,7 +2630,7 @@ function manageSpawns(room) {
         }
     }
     // Courier: spawn when a deficit neighbor room needs energy and we have surplus
-    if (canSpawnEconomy && ((_r = room.memory.energySurplus) !== null && _r !== void 0 ? _r : 0) > 0) {
+    if (canSpawnEconomy && ((_t = room.memory.energySurplus) !== null && _t !== void 0 ? _t : 0) > 0) {
         const deficitRoom = findDeficitNeighbor(room);
         if (deficitRoom) {
             const existingCouriers = allHomeCreeps.filter(c => {
@@ -2599,7 +2645,7 @@ function manageSpawns(room) {
         }
     }
     // Repairer (phase-gated)
-    if (canSpawnEconomy && ((_s = counts.repairer) !== null && _s !== void 0 ? _s : 0) < ((_t = combat.repairer) !== null && _t !== void 0 ? _t : 0)) {
+    if (canSpawnEconomy && ((_u = counts.repairer) !== null && _u !== void 0 ? _u : 0) < ((_v = combat.repairer) !== null && _v !== void 0 ? _v : 0)) {
         trySpawn(spawn, 'repairer', room.energyAvailable);
         return;
     }
@@ -2607,17 +2653,17 @@ function manageSpawns(room) {
     const canSpawnCombat = !inSafeMode && room.energyAvailable >= MIN_COMBAT_ENERGY &&
         (status.level === 'SURPLUS' || status.level === 'STABLE');
     if (canSpawnCombat) {
-        if (((_u = counts.warrior) !== null && _u !== void 0 ? _u : 0) < combat.warrior) {
+        if (((_w = counts.warrior) !== null && _w !== void 0 ? _w : 0) < combat.warrior) {
             const platoonId = assignWarriorPlatoon(creeps);
             trySpawn(spawn, 'warrior', room.energyAvailable, { platoonId });
             return;
         }
-        if (((_v = counts.ranger) !== null && _v !== void 0 ? _v : 0) < combat.ranger) {
+        if (((_x = counts.ranger) !== null && _x !== void 0 ? _x : 0) < combat.ranger) {
             const platoonId = assignWarriorPlatoon(creeps);
             trySpawn(spawn, 'ranger', room.energyAvailable, { platoonId });
             return;
         }
-        if (((_w = counts.healer) !== null && _w !== void 0 ? _w : 0) < combat.healer) {
+        if (((_y = counts.healer) !== null && _y !== void 0 ? _y : 0) < combat.healer) {
             const platoonId = assignHealerPlatoon(creeps);
             if (platoonId)
                 trySpawn(spawn, 'healer', room.energyAvailable, { platoonId });
@@ -3034,9 +3080,13 @@ function placeTowers(room, rcl) {
     }
 }
 // ─── Links (RCL 5+) ──────────────────────────────────────────────────────────
-// Hub link near spawn + one link per source.
-// Source links → hub link via linkManager.ts (instant transfer, 3% loss).
-// Haulers withdraw from hub link instead of walking to source containers.
+// Placement priority (strategy report §RC5):
+//   1. Source links  — adjacent to each source; harvesters push energy in
+//   2. Controller link — adjacent to controller; upgraders withdraw without traveling
+//   3. Hub link near spawn — haulers withdraw here instead of walking to containers
+//
+// With only 2 links (RC5): source + controller → upgrader throughput is maximised.
+// At 4 links (RC7): both controller + hub are present → all roles benefit.
 function placeLinks(room, rcl) {
     var _a;
     const built = room.find(FIND_MY_STRUCTURES, { filter: s => s.structureType === STRUCTURE_LINK }).length;
@@ -3045,27 +3095,7 @@ function placeLinks(room, rcl) {
     let remaining = allowed - built - pending;
     if (remaining <= 0)
         return;
-    const spawn = room.find(FIND_MY_SPAWNS)[0];
-    if (!spawn)
-        return;
-    // Hub link near spawn
-    const spawnLinkNearby = spawn.pos.findInRange(FIND_MY_STRUCTURES, 4, { filter: s => s.structureType === STRUCTURE_LINK }).length > 0 ||
-        spawn.pos.findInRange(FIND_MY_CONSTRUCTION_SITES, 4, { filter: s => s.structureType === STRUCTURE_LINK }).length > 0;
-    if (!spawnLinkNearby && remaining > 0) {
-        outer: for (let r = 2; r <= 5; r++) {
-            for (let dx = -r; dx <= r; dx++) {
-                for (let dy = -r; dy <= r; dy++) {
-                    if (Math.abs(dx) !== r && Math.abs(dy) !== r)
-                        continue;
-                    if (room.createConstructionSite(spawn.pos.x + dx, spawn.pos.y + dy, STRUCTURE_LINK) === OK) {
-                        remaining--;
-                        break outer;
-                    }
-                }
-            }
-        }
-    }
-    // Source links
+    // 1. Source links
     for (const source of room.find(FIND_SOURCES)) {
         if (remaining <= 0)
             break;
@@ -3081,6 +3111,53 @@ function placeLinks(room, rcl) {
                 if (room.createConstructionSite(source.pos.x + dx, source.pos.y + dy, STRUCTURE_LINK) === OK) {
                     placed = true;
                     remaining--;
+                }
+            }
+        }
+    }
+    if (remaining <= 0)
+        return;
+    // 2. Controller link — upgraders sit here and draw energy without making trips
+    const ctrl = room.controller;
+    if (ctrl) {
+        const hasCtrlLink = ctrl.pos.findInRange(FIND_MY_STRUCTURES, 3, { filter: s => s.structureType === STRUCTURE_LINK }).length > 0 ||
+            ctrl.pos.findInRange(FIND_MY_CONSTRUCTION_SITES, 3, { filter: s => s.structureType === STRUCTURE_LINK }).length > 0;
+        if (!hasCtrlLink) {
+            outer: for (let r = 1; r <= 3; r++) {
+                for (let dx = -r; dx <= r; dx++) {
+                    for (let dy = -r; dy <= r; dy++) {
+                        if (Math.abs(dx) !== r && Math.abs(dy) !== r)
+                            continue;
+                        const x = ctrl.pos.x + dx, y = ctrl.pos.y + dy;
+                        if (x < 2 || x > 47 || y < 2 || y > 47)
+                            continue;
+                        if (room.createConstructionSite(x, y, STRUCTURE_LINK) === OK) {
+                            remaining--;
+                            break outer;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if (remaining <= 0)
+        return;
+    // 3. Hub link near spawn — allows haulers to withdraw locally (RC7+)
+    const spawn = room.find(FIND_MY_SPAWNS)[0];
+    if (spawn) {
+        const spawnLinkNearby = spawn.pos.findInRange(FIND_MY_STRUCTURES, 4, { filter: s => s.structureType === STRUCTURE_LINK }).length > 0 ||
+            spawn.pos.findInRange(FIND_MY_CONSTRUCTION_SITES, 4, { filter: s => s.structureType === STRUCTURE_LINK }).length > 0;
+        if (!spawnLinkNearby) {
+            outer: for (let r = 2; r <= 5; r++) {
+                for (let dx = -r; dx <= r; dx++) {
+                    for (let dy = -r; dy <= r; dy++) {
+                        if (Math.abs(dx) !== r && Math.abs(dy) !== r)
+                            continue;
+                        if (room.createConstructionSite(spawn.pos.x + dx, spawn.pos.y + dy, STRUCTURE_LINK) === OK) {
+                            remaining--;
+                            break outer;
+                        }
+                    }
                 }
             }
         }
@@ -3717,11 +3794,19 @@ function threatScore(creep) {
 }
 
 // Manages StructureLink energy transfers.
-// Pattern: source links (near each energy source) drain into a hub link (near spawn).
-// Haulers then withdraw from the hub link, eliminating long hauler trips.
-// 3% energy loss per transfer is acceptable — creep travel time is far more expensive.
+//
+// Topology (set by constructionManager at RCL5+):
+//   RC5–6 (2–3 links): source link(s) + controller link
+//   RC7+  (4+ links):  source link(s) + controller link + hub link near spawn
+//
+// Source links are identified by adjacency to a FIND_SOURCES (range 2).
+// Everything else is a sink — controller link (range ≤3 of controller) for
+// upgraders, hub link (closest to spawn, not controller) for haulers.
+//
+// Energy flows: source links → controller link (primary) and hub link (secondary).
+// Both sinks receive energy proportional to their free capacity.
 function manageLinkTransfers(room) {
-    var _a, _b, _c;
+    var _a, _b;
     if (((_b = (_a = room.controller) === null || _a === void 0 ? void 0 : _a.level) !== null && _b !== void 0 ? _b : 0) < 5)
         return;
     const links = room.find(FIND_MY_STRUCTURES, {
@@ -3732,19 +3817,41 @@ function manageLinkTransfers(room) {
     const spawn = room.find(FIND_MY_SPAWNS)[0];
     if (!spawn)
         return;
-    // Hub = link closest to spawn; all others are source links
-    const hub = links.reduce((a, b) => a.pos.getRangeTo(spawn) <= b.pos.getRangeTo(spawn) ? a : b);
-    const sourceLinks = links.filter(l => l.id !== hub.id);
-    // Transfer when: source link is well-loaded AND hub has room
-    const hubFree = (_c = hub.store.getFreeCapacity(RESOURCE_ENERGY)) !== null && _c !== void 0 ? _c : 0;
-    if (hubFree < 100)
-        return; // hub is full enough
+    const ctrl = room.controller;
+    const sources = room.find(FIND_SOURCES);
+    // Source links: adjacent to any source (range 2). These push energy in.
+    const sourceLinks = links.filter(l => sources.some(src => src.pos.getRangeTo(l) <= 2));
+    // Sink links: everything else (not adjacent to any source).
+    const sinkLinks = links.filter(l => !sources.some(src => src.pos.getRangeTo(l) <= 2));
+    if (sourceLinks.length === 0 || sinkLinks.length === 0)
+        return;
+    // Controller link: the sink closest to the controller (upgrader energy supply).
+    const ctrlLink = ctrl
+        ? sinkLinks.reduce((a, b) => a.pos.getRangeTo(ctrl) <= b.pos.getRangeTo(ctrl) ? a : b)
+        : sinkLinks[0];
+    // Hub link: the remaining sink closest to spawn (hauler energy supply).
+    const otherSinks = sinkLinks.filter(l => l.id !== ctrlLink.id);
+    const hubLink = otherSinks.length > 0
+        ? otherSinks.reduce((a, b) => a.pos.getRangeTo(spawn) <= b.pos.getRangeTo(spawn) ? a : b)
+        : null;
+    const sinks = [ctrlLink, hubLink].filter(Boolean);
     for (const link of sourceLinks) {
         if (link.cooldown > 0)
             continue;
         if (link.store[RESOURCE_ENERGY] < 400)
-            continue; // don't send half-loads
-        link.transferEnergy(hub);
+            continue;
+        // Send to the sink with the most free capacity — fills both evenly.
+        const bestSink = sinks.reduce((best, sink) => {
+            var _a, _b;
+            const free = (_a = sink.store.getFreeCapacity(RESOURCE_ENERGY)) !== null && _a !== void 0 ? _a : 0;
+            if (free < 100)
+                return best;
+            if (!best)
+                return sink;
+            return free > ((_b = best.store.getFreeCapacity(RESOURCE_ENERGY)) !== null && _b !== void 0 ? _b : 0) ? sink : best;
+        }, null);
+        if (bestSink)
+            link.transferEnergy(bestSink);
     }
 }
 
@@ -3936,7 +4043,7 @@ function bestHaulerCarry(energyCap) {
 }
 
 // Updated automatically by `just deploy` — do not edit manually
-const REGIME = '2026-06-02-c4ccab5';
+const REGIME = '2026-06-03-9b3fec9';
 
 const REPORT_INTERVAL = 50;
 const LOG_INTERVAL = 200;
@@ -3945,7 +4052,12 @@ const LAYOUT_INTERVAL = 1000;
 function reportStats(room) {
     var _a, _b, _c, _d, _e, _f, _g, _h, _j, _k, _l, _m, _o;
     const snap = buildSnapshot(room);
-    if (period(LAYOUT_INTERVAL, `layout:${room.name}`))
+    // Broadcast force-capture tick so all rooms capture on the same tick, not just the first
+    if (Memory.captureLayout) {
+        Memory.captureLayoutAt = Game.time;
+        Memory.captureLayout = false;
+    }
+    if (Memory.captureLayoutAt === Game.time || period(LAYOUT_INTERVAL, `layout:${room.name}`))
         captureRoomLayout(room);
     if (period(LOG_INTERVAL, 'stats:log')) {
         if (!Memory.statsLog)

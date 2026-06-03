@@ -1,6 +1,6 @@
 // Monte Carlo simulation harness.
 // Runs N noisy simulations, extracts percentile bands, detects milestones,
-// and compares 4 spawn strategies to produce build-order recommendations.
+// and compares 8 build orders to produce build-order recommendations.
 
 import { simulateOnce } from './engine.mjs';
 import { scoreRun } from './heuristics.mjs';
@@ -19,13 +19,70 @@ function percentilesOf(values) {
   return { p10: percentile(s, 0.10), p25: percentile(s, 0.25), p50: percentile(s, 0.50), p75: percentile(s, 0.75), p90: percentile(s, 0.90) };
 }
 
-// ─── Build order definitions ─────────────────────────────────────────────────
+// ─── Build order definitions ──────────────────────────────────────────────────
+//
+// spawnStrategy → passed to decideNextSpawn() in engine.mjs
+// buildPriority → passed to resolveBuildTarget() in engine.mjs
 
 export const BUILD_ORDERS = [
-  { key: 'adaptive',    label: 'Adaptive (current)', description: 'Bottleneck-driven spawn logic — mirrors what the live bot does' },
-  { key: 'upgradeRush', label: 'Upgrade Rush',       description: 'Base economy fast, then pour into upgraders for RCL3 speed' },
-  { key: 'economyStack',label: 'Economy Stack',      description: 'Max harvesters and haulers before any upgraders — high stability' },
-  { key: 'military',    label: 'Military Prep',      description: 'Build warriors alongside economy for an early aggression window' },
+  // ── Existing spawn strategies ───────────────────────────────────────────────
+  {
+    key: 'adaptive',
+    spawnStrategy: 'adaptive',
+    buildPriority: 'extensions',
+    label:       'Adaptive (current)',
+    description: 'Bottleneck-driven spawn logic with extensions-first construction — mirrors the live bot',
+  },
+  {
+    key: 'upgradeRush',
+    spawnStrategy: 'upgradeRush',
+    buildPriority: 'extensions',
+    label:       'Upgrade Rush',
+    description: 'Minimal economy, then flood upgraders for maximum RCL speed',
+  },
+  {
+    key: 'economyStack',
+    spawnStrategy: 'economyStack',
+    buildPriority: 'extensions',
+    label:       'Economy Stack',
+    description: 'Max harvesters and haulers before any upgraders — high energy stability',
+  },
+  {
+    key: 'military',
+    spawnStrategy: 'military',
+    buildPriority: 'extensions',
+    label:       'Military Prep',
+    description: 'Warriors alongside economy for an early aggression window',
+  },
+  // ── New build-order variants ────────────────────────────────────────────────
+  {
+    key: 'containersFirst',
+    spawnStrategy: 'adaptive',
+    buildPriority: 'containers',
+    label:       'Containers First',
+    description: 'Build source containers before extensions — unlocks 2× harvest efficiency sooner',
+  },
+  {
+    key: 'roadsFirst',
+    spawnStrategy: 'adaptive',
+    buildPriority: 'roads',
+    label:       'Roads First',
+    description: 'Build 10 key roads before containers/extensions — halves hauler travel time early',
+  },
+  {
+    key: 'remoteMiner',
+    spawnStrategy: 'remoteMiner',
+    buildPriority: 'roads',
+    label:       'Remote Miner',
+    description: 'Invest in adjacent-room mining for ~85% income boost after roads are established',
+  },
+  {
+    key: 'towerDefense',
+    spawnStrategy: 'towerDefense',
+    buildPriority: 'towers',
+    label:       'Tower Defense',
+    description: 'Prioritize building a tower at RCL3 for defensive coverage; slight economy delay',
+  },
 ];
 
 // ─── Main Monte Carlo runner ──────────────────────────────────────────────────
@@ -35,53 +92,59 @@ export const BUILD_ORDERS = [
  *
  * @param {object} initialState   - Last statsLog snapshot
  * @param {object} opts
- * @param {number}  opts.runs         - Number of simulation runs per strategy (default 200)
- * @param {number}  opts.ticksForward - Ticks to project (default 2000)
- * @param {number}  opts.stepSize     - Ticks per sim step (default 50)
- *
- * @returns {{
- *   baseTick, runs, ticksForward, stepSize, checkpoints,
- *   energy, ctrlPct, creepTotal, rcl,
- *   milestones, buildOrders, recommendations
- * }}
+ * @param {number}  opts.runs         - Number of simulation runs for the main adaptive band (default 200)
+ * @param {number}  opts.ticksForward - Ticks to project (default 260,000 = 24h)
+ * @param {number}  opts.stepSize     - Ticks per sim step (default 500)
  */
 export function runMonteCarlo(initialState, opts = {}) {
-  const { runs = 200, ticksForward = 2000, stepSize = 50 } = opts;
-  const steps = ticksForward / stepSize;
+  const { runs = 200, ticksForward = 260_000, stepSize = 500 } = opts;
+  const steps       = Math.ceil(ticksForward / stepSize);
   const checkpoints = Array.from({ length: steps }, (_, i) => (i + 1) * stepSize);
-  // Load calibration once and pass it to every simulateOnce call — avoids 200+ disk reads
   const calibration = loadCalibration();
 
-  // Per-step accumulators: [stepIndex] = array of values across runs
-  const energyByStep    = Array.from({ length: steps }, () => []);
-  const ctrlPctByStep   = Array.from({ length: steps }, () => []);
-  const creepTotByStep  = Array.from({ length: steps }, () => []);
-  const rclByStep       = Array.from({ length: steps }, () => []);
+  // Per-step accumulators: [stepIndex] = values across runs
+  const energyByStep   = Array.from({ length: steps }, () => []);
+  const ctrlPctByStep  = Array.from({ length: steps }, () => []);
+  const creepTotByStep = Array.from({ length: steps }, () => []);
+  const rclByStep      = Array.from({ length: steps }, () => []);
 
-  // Milestone accumulators (collected in the same loop, no extra runs needed)
-  const rcl3Ticks  = [];
+  // Milestone accumulators (first tick each milestone is reached, Infinity if never)
+  const rcl3Ticks   = [];
+  const rcl4Ticks   = [];
+  const rcl5Ticks   = [];
+  const remoteTicks = [];
   const crisisRates = [];
 
-  // Run the default (adaptive) strategy for projection bands + milestone data
+  // Main band: adaptive strategy with 200 full runs
   for (let r = 0; r < runs; r++) {
-    const snaps = simulateOnce(initialState, ticksForward, { stepSize, strategy: 'adaptive', noisy: true, calibration });
+    const snaps = simulateOnce(initialState, ticksForward, {
+      stepSize, strategy: 'adaptive', buildPriority: 'extensions', noisy: true, calibration,
+    });
 
-    let rcl3Tick   = Infinity;
+    let rcl3Tick = Infinity, rcl4Tick = Infinity, rcl5Tick = Infinity, remoteTick = Infinity;
     let crisisCount = 0;
+
     snaps.forEach((s, i) => {
       energyByStep[i].push(s.energy.avail);
       ctrlPctByStep[i].push(s.ctrl.pct);
       creepTotByStep[i].push(Object.values(s.creeps).reduce((a, b) => a + b, 0));
       rclByStep[i].push(s.rcl);
 
-      if (rcl3Tick === Infinity && s.rcl >= 3) rcl3Tick = s.elapsed;
+      if (rcl3Tick   === Infinity && s.rcl >= 3)                      rcl3Tick   = s.elapsed;
+      if (rcl4Tick   === Infinity && s.rcl >= 4)                      rcl4Tick   = s.elapsed;
+      if (rcl5Tick   === Infinity && s.rcl >= 5)                      rcl5Tick   = s.elapsed;
+      if (remoteTick === Infinity && (s.structs?.remoteRooms ?? 0) >= 1) remoteTick = s.elapsed;
       if (s.energy.avail < s.energy.cap * 0.10) crisisCount++;
     });
+
     rcl3Ticks.push(rcl3Tick);
+    rcl4Ticks.push(rcl4Tick);
+    rcl5Ticks.push(rcl5Tick);
+    remoteTicks.push(remoteTick);
     crisisRates.push(crisisCount / snaps.length);
   }
 
-  // ── Percentile bands ────────────────────────────────────────────────────────
+  // ── Percentile bands ─────────────────────────────────────────────────────────
 
   function bandsFor(byStep) {
     return {
@@ -93,31 +156,42 @@ export function runMonteCarlo(initialState, opts = {}) {
     };
   }
 
-  // ── Milestones ──────────────────────────────────────────────────────────────
+  // ── Milestones ────────────────────────────────────────────────────────────────
 
-  const rcl3Finite = rcl3Ticks.filter(t => t < Infinity);
-  const rcl3Prob   = rcl3Finite.length / runs;
-  const rcl3Percs  = rcl3Finite.length > 0 ? percentilesOf(rcl3Finite) : null;
+  function milestoneStats(ticks) {
+    const finite = ticks.filter(t => t < Infinity);
+    return {
+      probWithinHorizon: Math.round(finite.length / runs * 100) / 100,
+      ...(finite.length > 0 ? percentilesOf(finite) : {}),
+    };
+  }
+
   const avgCrisisRate = crisisRates.reduce((a, b) => a + b, 0) / crisisRates.length;
 
-  // ── Build order comparison ──────────────────────────────────────────────────
+  // ── Build order comparison ────────────────────────────────────────────────────
+
+  const COMP_RUNS = Math.ceil(runs / 4);
 
   const buildOrderResults = BUILD_ORDERS.map(bo => {
-    const COMP_RUNS = Math.ceil(runs / 4); // fewer runs for comparison (still meaningful)
-    const scores      = [];
-    const rcl3probs   = [];
-    const ctrlAt2000  = [];
+    const scores       = [];
+    const rcl4probs    = [];
+    const ctrlAtEnd    = [];
     const stabilityArr = [];
 
     for (let r = 0; r < COMP_RUNS; r++) {
-      const snaps = simulateOnce(initialState, ticksForward, { stepSize, strategy: bo.key, noisy: true, calibration });
+      const snaps = simulateOnce(initialState, ticksForward, {
+        stepSize,
+        strategy:      bo.spawnStrategy ?? bo.key,
+        buildPriority: bo.buildPriority ?? 'extensions',
+        noisy:         true,
+        calibration,
+      });
+
       scores.push(scoreRun(snaps));
 
       const last = snaps.at(-1);
-      ctrlAt2000.push(last?.ctrl?.pct ?? 0);
-
-      const hitRcl3 = snaps.some(s => s.rcl >= 3);
-      rcl3probs.push(hitRcl3 ? 1 : 0);
+      ctrlAtEnd.push(last?.ctrl?.pct ?? 0);
+      rcl4probs.push(snaps.some(s => s.rcl >= 4) ? 1 : 0);
 
       const stableSnaps = snaps.filter(s => s.energy.avail > s.energy.cap * 0.25).length;
       stabilityArr.push(stableSnaps / snaps.length);
@@ -130,20 +204,18 @@ export function runMonteCarlo(initialState, opts = {}) {
       label:          bo.label,
       description:    bo.description,
       score:          Math.round(mean(scores) * 10) / 10,
-      rcl3Prob:       Math.round(mean(rcl3probs) * 100) / 100,
-      ctrlPctAt2000:  Math.round(mean(ctrlAt2000)),
+      rcl4Prob:       Math.round(mean(rcl4probs) * 100) / 100,
+      ctrlPctAtEnd:   Math.round(mean(ctrlAtEnd)),
       stabilityScore: Math.round(mean(stabilityArr) * 100) / 100,
     };
   });
 
-  // Sort by composite score descending
   buildOrderResults.sort((a, b) => b.score - a.score);
 
-  // ── Recommendations ─────────────────────────────────────────────────────────
+  // ── Recommendations ───────────────────────────────────────────────────────────
 
   const recommendations = [];
-  const latest = initialState;
-  const bottleneck = latest.energy?.bottleneck ?? 'BALANCED';
+  const bottleneck = initialState.energy?.bottleneck ?? 'BALANCED';
 
   if (bottleneck === 'HARVESTER_SHORTAGE') {
     recommendations.push({
@@ -157,28 +229,38 @@ export function runMonteCarlo(initialState, opts = {}) {
       priority: 'HIGH',
       type:     'spawn',
       role:     'hauler',
-      reason:   'HAULER_SHORTAGE — energy is being harvested but not delivered; add haulers to unlock income',
+      reason:   'HAULER_SHORTAGE — energy is harvested but not delivered; add haulers to unlock income',
     });
   }
 
-  // If upgrade rush beats adaptive by meaningful margin, recommend it
   const adaptiveResult    = buildOrderResults.find(b => b.key === 'adaptive');
   const upgradeRushResult = buildOrderResults.find(b => b.key === 'upgradeRush');
-  if (upgradeRushResult && adaptiveResult && upgradeRushResult.ctrlPctAt2000 > adaptiveResult.ctrlPctAt2000 + 3) {
+  if (upgradeRushResult && adaptiveResult && upgradeRushResult.ctrlPctAtEnd > adaptiveResult.ctrlPctAtEnd + 3) {
     recommendations.push({
       priority: 'MEDIUM',
       type:     'strategy',
       action:   'Shift spawn priority toward upgraders',
-      reason:   `Upgrade Rush projects +${upgradeRushResult.ctrlPctAt2000 - adaptiveResult.ctrlPctAt2000}% controller progress at t+2000 vs current adaptive logic`,
+      reason:   `Upgrade Rush projects +${upgradeRushResult.ctrlPctAtEnd - adaptiveResult.ctrlPctAtEnd}% controller progress at 24h horizon vs current adaptive logic`,
     });
   }
 
-  if (latest.rcl < 3 && rcl3Prob < 0.15) {
+  const remoteMinerResult = buildOrderResults.find(b => b.key === 'remoteMiner');
+  if (remoteMinerResult && adaptiveResult && remoteMinerResult.score > adaptiveResult.score + 5) {
     recommendations.push({
       priority: 'MEDIUM',
       type:     'strategy',
-      action:   'Increase upgrader count — RCL3 is far',
-      reason:   `Only ${Math.round(rcl3Prob * 100)}% of simulations reach RCL3 within 2000 ticks at current trajectory`,
+      action:   'Consider remote mining expansion',
+      reason:   `Remote Miner scores +${(remoteMinerResult.score - adaptiveResult.score).toFixed(1)} vs Adaptive — adjacent room income could significantly accelerate RCL4`,
+    });
+  }
+
+  const rcl4Stats = milestoneStats(rcl4Ticks);
+  if (initialState.rcl < 4 && rcl4Stats.probWithinHorizon < 0.30) {
+    recommendations.push({
+      priority: 'MEDIUM',
+      type:     'strategy',
+      action:   'RCL4 at risk — review upgrader count',
+      reason:   `Only ${Math.round(rcl4Stats.probWithinHorizon * 100)}% of simulations reach RCL4 in the 24h window`,
     });
   }
 
@@ -191,17 +273,27 @@ export function runMonteCarlo(initialState, opts = {}) {
     });
   }
 
+  const topBuild = buildOrderResults[0];
+  if (topBuild && topBuild.key !== 'adaptive' && topBuild.score > (adaptiveResult?.score ?? 0) + 8) {
+    recommendations.push({
+      priority: 'LOW',
+      type:     'strategy',
+      action:   `Try "${topBuild.label}" build order`,
+      reason:   `Ranked #1 with score ${topBuild.score} — ${topBuild.description}`,
+    });
+  }
+
   if (!recommendations.length) {
     recommendations.push({
       priority: 'LOW',
       type:     'info',
       action:   'Colony is on a healthy trajectory',
-      reason:   'No critical issues detected in simulation; continue current strategy',
+      reason:   'No critical issues detected; continue current strategy',
     });
   }
 
   return {
-    baseTick:     initialState.tick,
+    baseTick:    initialState.tick,
     runs,
     ticksForward,
     stepSize,
@@ -213,10 +305,10 @@ export function runMonteCarlo(initialState, opts = {}) {
     rcl:        bandsFor(rclByStep),
 
     milestones: {
-      rcl3: {
-        probWithin2000t: Math.round(rcl3Prob * 100) / 100,
-        ...(rcl3Percs ?? {}),
-      },
+      rcl3:             milestoneStats(rcl3Ticks),
+      rcl4:             milestoneStats(rcl4Ticks),
+      rcl5:             milestoneStats(rcl5Ticks),
+      remoteRoom:       milestoneStats(remoteTicks),
       energyCrisisRate: Math.round(avgCrisisRate * 100) / 100,
     },
 

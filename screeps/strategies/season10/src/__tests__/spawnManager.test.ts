@@ -122,7 +122,7 @@ describe('manageSpawns — RC2', () => {
         manageSpawns(room);
         const spawn = room.find((global as any).FIND_MY_SPAWNS)[0];
         const [body] = spawn.spawnCreep.mock.calls[0];
-        expect(body).toEqual(['move', 'move', 'move', 'tough']);
+        expect(body).toEqual(['tough', 'move', 'move', 'move']);
     });
 });
 

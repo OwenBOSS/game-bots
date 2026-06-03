@@ -18,20 +18,14 @@ function onRCLevelUp(room: Room, level: number): void {
 
         case 2:
             if (!Memory.scoreCache) Memory.scoreCache = {};
-            room.memory.firstCollectorBeforeReserver = true;
             break;
 
         case 3:
             room.memory.collectorQuota = 3;
-            room.memory.scanCacheEnabled = true;
             break;
 
         case 4:
             room.memory.dynamicCollectorQuota = true;
-            break;
-
-        case 5:
-            room.memory.collectorsAboveUpgraders = true;
             break;
 
         case 8:

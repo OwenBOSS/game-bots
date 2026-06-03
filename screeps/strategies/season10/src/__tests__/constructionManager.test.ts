@@ -4,10 +4,12 @@ import { makeRoom, makeController, makeStorage } from './helpers';
 
 beforeEach(() => {
     (global as any).STRUCTURE_CONTAINER  = 'container';
+    (global as any).STRUCTURE_EXTENSION  = 'extension';
     (global as any).STRUCTURE_TOWER      = 'tower';
     (global as any).STRUCTURE_STORAGE    = 'storage';
     (global as any).FIND_SOURCES         = 105;
     (global as any).FIND_MY_STRUCTURES   = 108;
+    (global as any).FIND_MY_SPAWNS       = 101;
     (global as any).FIND_STRUCTURES      = 107;
     (global as any).FIND_CONSTRUCTION_SITES = 109;
     (global as any).OK = 0;
@@ -15,6 +17,8 @@ beforeEach(() => {
         scoreMap: {}, scoreCache: {}, knownRooms: [],
         observerIndex: 0, observerTargets: [],
     };
+    // Use a tick not divisible by 200 so the container re-check guard fires correctly
+    (global as any).Game = { ...((global as any).Game ?? {}), time: 1001 };
 });
 
 function makeSource(x = 25, y = 15): any {
@@ -39,10 +43,13 @@ function makeRCRoom(level: number, opts: {
         controller: makeController({ level }),
         storage: opts.storage ?? null,
         createConstructionSite: vi.fn(() => 0),
+        lookForAt: vi.fn(() => []),
+        findPath: vi.fn(() => []),
         find: vi.fn((type: number) => {
-            if (type === (global as any).FIND_SOURCES) return sources;
+            if (type === (global as any).FIND_SOURCES)  return sources;
             if (type === (global as any).FIND_MY_STRUCTURES) return structures;
-            if (type === (global as any).FIND_STRUCTURES) return structures;
+            if (type === (global as any).FIND_STRUCTURES)    return structures;
+            if (type === (global as any).FIND_MY_SPAWNS)     return [];
             if (type === (global as any).FIND_CONSTRUCTION_SITES)
                 return Array.from({ length: siteCount }, (_, i) => ({ id: `site${i}` }));
             return [];
