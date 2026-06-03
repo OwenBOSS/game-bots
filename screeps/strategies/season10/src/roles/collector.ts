@@ -1,77 +1,56 @@
-// Finds Score objects in the current room (or moves to a target room) and collects them.
-// Season 10: Score objects are found via FIND_SCORES (10031).
-// Collection: move to the Score object's position. The game may auto-collect on contact,
-// or require pickup() — test both on the Season server.
+// Collector role — moves to Score objects and steps on them for automatic collection.
+// Uses targetScoreId in memory for cross-room tracking via Game.getObjectById.
 
 export function runCollector(creep: Creep): void {
-    // First look for scores in current room
-    const localScores = (creep.room.find as Function)(FIND_SCORES) as ScoreObject[];
+    const mem = creep.memory as any;
 
-    if (localScores.length > 0) {
-        // Target the highest-value score that is also closest (weighted)
-        const target = bestScore(creep, localScores);
-        collectScore(creep, target);
-        return;
+    // Validate existing target: clear if expired or collected
+    if (mem.targetScoreId) {
+        const target = Game.getObjectById(mem.targetScoreId as Id<any>);
+        if (!target) mem.targetScoreId = null;
     }
 
-    // No scores here — move to a known adjacent room that might have scores
-    const nextRoom = pickNextRoom(creep);
-    if (nextRoom) {
-        moveToRoom(creep, nextRoom);
-    } else {
-        // Idle: stay near center of room, ready to react
-        creep.moveTo(new RoomPosition(25, 25, creep.room.name), { reusePath: 10 });
+    // Assign new target
+    if (!mem.targetScoreId) {
+        mem.targetScoreId = findBestScore(creep);
     }
-}
 
-function collectScore(creep: Creep, target: ScoreObject): void {
-    if (creep.pos.isEqualTo(target.pos)) {
-        // Attempt pickup — if this API doesn't work on Season, try transfer or just being on tile
-        const result = (creep as any).pickup(target);
-        if (result !== OK && result !== ERR_INVALID_TARGET) {
-            console.log(`[season10] pickup result: ${result}`);
+    if (mem.targetScoreId) {
+        const target = Game.getObjectById(mem.targetScoreId as Id<any>) as any;
+        if (target) {
+            creep.moveTo(target.pos, { reusePath: 20 });
+            return;
         }
-    } else {
-        creep.moveTo(target.pos, { reusePath: 2 });
+        mem.targetScoreId = null;
     }
+
+    // No known score: patrol toward home room
+    const home = mem.homeRoom ?? creep.room.name;
+    creep.moveTo(new RoomPosition(25, 25, home), { reusePath: 50 });
 }
 
-// Value = score points / (distance + 1) — prioritize nearby high-value scores
-function bestScore(creep: Creep, scores: ScoreObject[]): ScoreObject {
-    return scores.reduce((best, s) => {
-        const dist = creep.pos.getRangeTo(s.pos);
-        const currentValue = best.score / (creep.pos.getRangeTo(best.pos) + 1);
-        const candidateValue = s.score / (dist + 1);
-        return candidateValue > currentValue ? s : best;
-    });
-}
+export function findBestScore(creep: Creep): string | null {
+    let bestId: string | null = null;
+    let bestValue = -1;
 
-function pickNextRoom(creep: Creep): string | null {
-    const known = Memory.knownRooms ?? [];
-    const exits = Game.map.describeExits(creep.room.name);
-    if (!exits) return null;
+    for (const roomName in Game.rooms) {
+        const room = Game.rooms[roomName];
+        const scores = (room.find as Function)(FIND_SCORES) as Score[];
+        for (const score of scores) {
+            const dist = Game.map.getRoomLinearDistance(creep.room.name, roomName);
 
-    const exitRooms = Object.values(exits).filter((r): r is string => !!r);
+            // Skip scores we cannot reach in time (travel estimate: dist * 2 ticks)
+            if (dist * 2 > score.ticksToDecay * 0.8) continue;
 
-    for (const roomName of exitRooms) {
-        if (!known.includes(roomName)) {
-            return roomName;
+            const urgency = score.ticksToDecay < 500 ? 2 : 1;
+            const value   = (score.score * urgency) / (dist + 1);
+
+            if (value > bestValue) {
+                bestValue = value;
+                bestId    = score.id as unknown as string;
+            }
         }
     }
 
-    // All adjacent explored — re-check the one with scores most recently
-    const scoreMap = Memory.scoreMap ?? {};
-    const candidates = Object.entries(scoreMap)
-        .filter(([room]) => exitRooms.includes(room))
-        .sort((a, b) => b[1].score - a[1].score);
-
-    return candidates.length > 0 ? candidates[0][0] : null;
-}
-
-function moveToRoom(creep: Creep, roomName: string): void {
-    const exitDir = creep.room.findExitTo(roomName);
-    if (exitDir !== ERR_NO_PATH && exitDir !== ERR_INVALID_ARGS) {
-        const exit = creep.pos.findClosestByRange(exitDir);
-        if (exit) creep.moveTo(exit, { reusePath: 3 });
-    }
+    return bestId;
 }
