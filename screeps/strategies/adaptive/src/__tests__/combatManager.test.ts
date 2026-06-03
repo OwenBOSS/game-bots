@@ -628,3 +628,90 @@ describe('checkSafeMode via manageCombat', () => {
         expect(activate).toHaveBeenCalledTimes(1);
     });
 });
+
+// ─── manageCombatState — MARCH → ENGAGE transition ───────────────────────────
+
+describe('manageCombatState — MARCH to ENGAGE via global creep scan', () => {
+    function makeWarriorCreep(opts: {
+        name: string;
+        homeRoom: string;
+        currentRoom?: string;
+        role?: string;
+    }): any {
+        return {
+            name:   opts.name,
+            room:   { name: opts.currentRoom ?? opts.homeRoom },
+            memory: {
+                role:           opts.role ?? 'warrior',
+                homeRoom:       opts.homeRoom,
+                targetRoomName: opts.currentRoom ?? opts.homeRoom,
+            },
+        };
+    }
+
+    it('transitions MARCH → ENGAGE when all fighters are in enemy room (global scan)', () => {
+        // 4 warriors homed in W1N1, all physically in the enemy room W2N1
+        const fighters = Array.from({ length: 4 }, (_, i) =>
+            makeWarriorCreep({ name: `w${i}`, homeRoom: 'W1N1', currentRoom: 'W2N1', role: 'warrior' })
+        );
+
+        (global as any).Game.creeps = Object.fromEntries(fighters.map(c => [c.name, c]));
+
+        const room = makeRoom({
+            name:    'W1N1',
+            memory:  { combatState: 'MARCH', enemyRoomName: 'W2N1', rallyTick: 900 },
+            // room.find returns 0 creeps — they are all in the enemy room
+            myCreeps: [],
+        });
+        (global as any).Game.rooms = { W1N1: room };
+
+        manageCombat(room);
+
+        expect(room.memory.combatState).toBe('ENGAGE');
+    });
+
+    it('does NOT reset to RALLY when fighters are in enemy room (regression: room.find bug)', () => {
+        // Before the fix, room.find returned 0 fighters → immediate RALLY reset
+        const fighters = Array.from({ length: 4 }, (_, i) =>
+            makeWarriorCreep({ name: `w${i}`, homeRoom: 'W1N1', currentRoom: 'W2N1', role: 'warrior' })
+        );
+
+        (global as any).Game.creeps = Object.fromEntries(fighters.map(c => [c.name, c]));
+
+        const room = makeRoom({
+            name:    'W1N1',
+            memory:  { combatState: 'MARCH', enemyRoomName: 'W2N1', rallyTick: 900 },
+            myCreeps: [],
+        });
+        (global as any).Game.rooms = { W1N1: room };
+
+        manageCombat(room);
+
+        expect(room.memory.combatState).not.toBe('RALLY');
+    });
+
+    it('keeps MARCH while fighters are still travelling (some not yet in enemy room)', () => {
+        // 2 of 4 fighters reached the enemy room, 2 are still travelling
+        const inEnemy = Array.from({ length: 2 }, (_, i) =>
+            makeWarriorCreep({ name: `w_arrived_${i}`, homeRoom: 'W1N1', currentRoom: 'W2N1' })
+        );
+        const travelling = Array.from({ length: 2 }, (_, i) =>
+            makeWarriorCreep({ name: `w_travelling_${i}`, homeRoom: 'W1N1', currentRoom: 'W1N1' })
+        );
+
+        (global as any).Game.creeps = Object.fromEntries(
+            [...inEnemy, ...travelling].map(c => [c.name, c])
+        );
+
+        const room = makeRoom({
+            name:    'W1N1',
+            memory:  { combatState: 'MARCH', enemyRoomName: 'W2N1', rallyTick: 900 },
+            myCreeps: travelling,  // only travellers visible in home room
+        });
+        (global as any).Game.rooms = { W1N1: room };
+
+        manageCombat(room);
+
+        expect(room.memory.combatState).toBe('MARCH');
+    });
+});

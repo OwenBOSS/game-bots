@@ -3,6 +3,7 @@
 // When assigned to a quad, uses quad-coordinated target ID (set by quadManager).
 
 import { moveTo as smartMove } from '../utils/trafficManager';
+import { followQuadLeader }    from '../managers/quadManager';
 
 const RETREAT_THRESHOLD = 0.3;
 
@@ -190,7 +191,7 @@ function engageInRoom(creep: Creep): void {
     const target = (quadTarget as Creep | AnyOwnedStructure | null) ?? findCombatTarget(creep);
     if (!target) {
         // Patrol center — there may be nothing left to attack
-        smartMove(creep,new RoomPosition(25, 25, creep.room.name), { reusePath: 10 });
+        if (!followQuadLeader(creep)) smartMove(creep, new RoomPosition(25, 25, creep.room.name), { reusePath: 10 });
         return;
     }
 
@@ -202,28 +203,45 @@ function engageInRoom(creep: Creep): void {
         creep.rangedAttack(target as Creep);
     }
 
-    // Melee attack if adjacent
+    // Melee attack if adjacent; otherwise move — quad non-leaders follow their
+    // leader first so the formation stays tight, leaders move directly to target.
     if (range <= 1) {
         creep.attack(target as Creep);
-    } else {
-        smartMove(creep,target, { reusePath: 3 });
+    } else if (!followQuadLeader(creep)) {
+        smartMove(creep, target, { reusePath: 3 });
     }
 }
 
 function findCombatTarget(creep: Creep): Creep | AnyOwnedStructure | null {
-    // Priority: towers (greatest threat) > spawn (disables economy) > other creeps > structures
+    // Priority: towers → combat creeps → reserver → economy creeps → spawns → structures
     const tower = creep.pos.findClosestByPath(FIND_HOSTILE_STRUCTURES, {
         filter: s => s.structureType === STRUCTURE_TOWER,
     }) as StructureTower | null;
     if (tower) return tower;
 
+    const allHostiles = creep.room.find(FIND_HOSTILE_CREEPS);
+
+    const combatant = creep.pos.findClosestByPath(allHostiles.filter(c =>
+        c.body.some(p => p.type === ATTACK || p.type === RANGED_ATTACK || p.type === HEAL)
+    ));
+    if (combatant) return combatant;
+
+    const reserver = creep.pos.findClosestByPath(allHostiles.filter(c =>
+        c.body.some(p => p.type === CLAIM)
+    ));
+    if (reserver) return reserver;
+
+    const economyCreep = creep.pos.findClosestByPath(allHostiles.filter(c =>
+        c.body.some(p => p.type === WORK || p.type === CARRY)
+    ));
+    if (economyCreep) return economyCreep;
+
+    if (allHostiles.length > 0) return creep.pos.findClosestByPath(allHostiles);
+
     const spawn = creep.pos.findClosestByPath(FIND_HOSTILE_STRUCTURES, {
         filter: s => s.structureType === STRUCTURE_SPAWN,
     }) as StructureSpawn | null;
     if (spawn) return spawn;
-
-    const hostileCreep = creep.pos.findClosestByPath(FIND_HOSTILE_CREEPS);
-    if (hostileCreep) return hostileCreep;
 
     return creep.pos.findClosestByPath(FIND_HOSTILE_STRUCTURES) as AnyOwnedStructure | null;
 }

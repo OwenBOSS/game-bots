@@ -8,6 +8,17 @@ import { moveTo } from '../utils/trafficManager';
 const MIN_LOOT_AMOUNT = 30; // ignore tiny piles not worth the trip
 
 export function runScavenger(creep: Creep): void {
+    // Auto-dispatch to enemy room while our fighters are engaged there so we can
+    // collect energy dropped by killed harvesters/haulers.  Clear it once combat ends.
+    const homeRoom = creep.memory.homeRoom ? Game.rooms[creep.memory.homeRoom] : undefined;
+    const enemyRoom = homeRoom?.memory.enemyRoomName;
+    const combatActive = homeRoom?.memory.combatState === 'ENGAGE' || homeRoom?.memory.combatState === 'MARCH';
+    if (combatActive && enemyRoom && !creep.memory.scavengeRoom) {
+        creep.memory.scavengeRoom = enemyRoom;
+    } else if (!combatActive && creep.memory.scavengeRoom && creep.memory.scavengeRoom === enemyRoom) {
+        creep.memory.scavengeRoom = undefined;
+    }
+
     if (creep.memory.working && creep.store[RESOURCE_ENERGY] === 0) {
         creep.memory.working = false;
     }

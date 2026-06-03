@@ -199,10 +199,13 @@ export function getFortifyTarget(room: Room): StructureRampart | null {
 // ─── Per-room combat state machine ───────────────────────────────────────────
 
 function manageCombatState(room: Room): void {
-    const allCombat = room.find(FIND_MY_CREEPS, {
-        filter: c => (c.memory.role === 'warrior' || c.memory.role === 'ranger' || c.memory.role === 'healer') &&
-            c.memory.homeRoom === room.name,
-    });
+    // Must use global creep registry — room.find() only sees creeps physically present in
+    // the home room, so it returns 0 fighters the moment they march to the enemy room,
+    // which would instantly reset combatState to RALLY and create an infinite bounce loop.
+    const allCombat = Object.values(Game.creeps).filter(c =>
+        (c.memory.role === 'warrior' || c.memory.role === 'ranger' || c.memory.role === 'healer') &&
+        c.memory.homeRoom === room.name,
+    );
     const fighters = allCombat.filter(c => c.memory.role === 'warrior' || c.memory.role === 'ranger');
     const healers  = allCombat.filter(c => c.memory.role === 'healer');
 
