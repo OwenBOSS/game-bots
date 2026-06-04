@@ -1,7 +1,7 @@
 // Season 10 spawn manager — RC-level aware, uses bodyBuilder for correct body selection.
-// Priority: harvesters → scouts (RC1) → builder (RC2+) → collectors → hunters (conditional).
+// Priority: harvesters → scouts → builder → upgrader → haulers → collectors → hunters.
 
-import { buildCollectorBody, buildHarvesterBody, buildHaulerBody, buildBuilderBody, buildScoutBody, buildHunterBody } from '../utils/bodyBuilder';
+import { buildCollectorBody, buildHarvesterBody, buildHaulerBody, buildBuilderBody, buildScoutBody, buildHunterBody, buildUpgraderBody, buildDefenderBody } from '../utils/bodyBuilder';
 import { findCached } from '../utils/tickCache';
 
 const MIN_HARVESTERS = 2;
@@ -29,64 +29,78 @@ export function manageSpawns(room: Room): void {
     const scouts     = creeps.filter((c: Creep) => c.memory.role === 'scout').length;
     const haulers    = creeps.filter((c: Creep) => c.memory.role === 'hauler').length;
     const builders   = creeps.filter((c: Creep) => c.memory.role === 'builder').length;
+    const upgraders  = creeps.filter((c: Creep) => c.memory.role === 'upgrader').length;
     const hunters    = creeps.filter((c: Creep) => c.memory.role === 'hunter').length;
+    const defenders  = creeps.filter((c: Creep) => c.memory.role === 'defender').length;
 
     const level = room.controller?.level ?? 1;
     const mem   = room.memory as RoomMemory;
 
+    const e = room.energyAvailable;
+
     // 1. Always maintain minimum harvesters first
     if (harvesters < MIN_HARVESTERS) {
-        trySpawn(spawn, 'harvester', buildHarvesterBody(room.energyAvailable));
-        return;
+        const body = buildHarvesterBody(e); if (body) { trySpawn(spawn, 'harvester', body); return; }
     }
 
-    // 2. RC1: spawn one scout immediately if flagged
-    if (level === 1 && mem.spawnScoutNext && scouts === 0) {
-        trySpawn(spawn, 'scout', buildScoutBody(room.energyAvailable));
-        return;
+    // 1.5. Spawn defenders when armed hostiles are in the room — higher priority than economy
+    {
+        const armed = findCached<Creep>(room, FIND_HOSTILE_CREEPS).filter(
+            (h: Creep) => h.body.some(p => p.type === ATTACK || p.type === RANGED_ATTACK || p.type === WORK)
+        );
+        if (armed.length > 0 && defenders < 2) {
+            const body = buildDefenderBody(e);
+            if (body) { trySpawn(spawn, 'defender', body, { homeRoom: room.name } as Partial<CreepMemory>); return; }
+        }
     }
 
-    // 3. RC2+: keep one builder when there are active construction sites
+    // 2. Keep one builder when there are active construction sites (any RC)
     const hasSites = findCached<ConstructionSite>(room, FIND_CONSTRUCTION_SITES).length > 0;
-    if (level >= 2 && builders < MAX_BUILDERS && hasSites) {
-        trySpawn(spawn, 'builder', buildBuilderBody(room.energyAvailable));
-        return;
+    if (builders < MAX_BUILDERS && hasSites) {
+        const body = buildBuilderBody(e); if (body) { trySpawn(spawn, 'builder', body); return; }
     }
 
-    // 4. Haulers: 1 per source, but only once containers exist
-    const allStructures = findCached<AnyStructure>(room, FIND_STRUCTURES);
+    // 3. Always keep one upgrader (controller progress = more spawn capacity)
+    if (upgraders < 1) {
+        const body = buildUpgraderBody(e); if (body) { trySpawn(spawn, 'upgrader', body); return; }
+    }
+
+    // 4. Haulers: 1 per source — picks up dropped energy even before containers exist
     const sourceCount = findCached<Source>(room, FIND_SOURCES).length;
-    const hasContainers = allStructures.some(
-        (s: AnyStructure) => s.structureType === STRUCTURE_CONTAINER
-    );
-    if (hasContainers && haulers < sourceCount) {
-        trySpawn(spawn, 'hauler', buildHaulerBody(room.energyAvailable));
-        return;
+    if (haulers < sourceCount) {
+        const body = buildHaulerBody(e); if (body) { trySpawn(spawn, 'hauler', body); return; }
     }
 
-    // 5. Determine collector quota
+    // 5. Scout — after production roles; [MOVE×5] lasts 1500 ticks so low churn
+    if (scouts === 0) {
+        const body = buildScoutBody(e); if (body) { trySpawn(spawn, 'scout', body); return; }
+    }
+
+    // 6. Collectors
     const quota = resolveCollectorQuota(room, level, mem);
-
-    // 6. Spawn collector if under quota — set homeRoom so idle collectors return correctly
     if (collectors < quota) {
-        trySpawn(spawn, 'collector', buildCollectorBody(room.energyAvailable), { homeRoom: room.name });
-        return;
+        const body = buildCollectorBody(e); if (body) { trySpawn(spawn, 'collector', body, { homeRoom: room.name }); return; }
     }
 
-    // 7. Spawn hunter if enemy collectors detected near Score rooms (RC3+)
+    // 7. Hunter if enemy collectors detected near Score rooms (RC3+)
     if (level >= 3 && hunters < 1 && enemiesNearScores()) {
-        trySpawn(spawn, 'hunter', buildHunterBody(room.energyAvailable));
+        const body = buildHunterBody(e); if (body) trySpawn(spawn, 'hunter', body);
     }
+}
+
+function countHomeScores(room: Room): number {
+    if (typeof FIND_SCORES === 'undefined') return 0;
+    return (room.find as Function)(FIND_SCORES).length;
 }
 
 function resolveCollectorQuota(room: Room, level: number, mem: RoomMemory): number {
     if (mem.dynamicCollectorQuota) return getCollectorQuota(room);
     if (mem.collectorQuota !== undefined) return mem.collectorQuota;
-    // Defaults by level
+    // Defaults by level — keep economy-first at low RC
     if (level >= 5) return 5;
     if (level >= 3) return 3;
-    if (level >= 2) return 1;
-    return 1; // RC1: spawn one collector immediately — scores are the entire point
+    if (level >= 2) return 2;
+    return 2; // RC1: two collectors while waiting for containers/builder
 }
 
 function enemiesNearScores(): boolean {
@@ -107,5 +121,9 @@ function trySpawn(
 ): void {
     if (!body) return;
     const name = `${role}_${Game.time}`;
-    spawn.spawnCreep(body, name, { memory: { role, working: false, ...extraMem } as CreepMemory });
+    const result = spawn.spawnCreep(body, name, { memory: { role, working: false, ...extraMem } as CreepMemory });
+    if (result === OK) {
+        const cost = body.reduce((s, p) => s + BODYPART_COST[p], 0);
+        console.log(`[season10] Spawning ${name} [${body.join(',')}] (${cost}e)`);
+    }
 }

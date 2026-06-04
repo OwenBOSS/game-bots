@@ -13,6 +13,12 @@ export function runHarvester(creep: Creep): void {
         return;
     }
 
+    // Bootstrap: travel to homeRoom if spawned by a different room (e.g. expansion seeding).
+    if (creep.memory.homeRoom && creep.room.name !== creep.memory.homeRoom) {
+        moveTo(creep, new RoomPosition(25, 25, creep.memory.homeRoom), { reusePath: 20, range: 23 });
+        return;
+    }
+
     const source = getAssignedSource(creep);
     if (!source) return;
 

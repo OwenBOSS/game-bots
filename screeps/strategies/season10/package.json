@@ -7,7 +7,7 @@
     "build": "rollup -c",
     "watch": "rollup -c --watch",
     "clean": "rimraf dist",
-    "deploy": "rollup -c && node -e \"const fs=require('fs'),p='C:/Users/owenb/AppData/Local/Screeps/scripts/screeps.com/season10';fs.mkdirSync(p,{recursive:true});fs.copyFileSync('dist/main.js',p+'/main.js');console.log('Deployed to branch: season10')\"",
+    "deploy": "rollup -c && node -e \"const fs=require('fs'),p='C:/Users/owenb/AppData/Local/Screeps/scripts/screeps.com/default';fs.mkdirSync(p,{recursive:true});fs.copyFileSync('dist/main.js',p+'/main.js');console.log('Deployed to branch: default')\"",
     "test": "vitest run",
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage"

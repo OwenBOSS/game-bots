@@ -113,6 +113,11 @@ function runHarvester(creep) {
         runRemote(creep);
         return;
     }
+    // Bootstrap: travel to homeRoom if spawned by a different room (e.g. expansion seeding).
+    if (creep.memory.homeRoom && creep.room.name !== creep.memory.homeRoom) {
+        moveTo(creep, new RoomPosition(25, 25, creep.memory.homeRoom), { reusePath: 20, range: 23 });
+        return;
+    }
     const source = getAssignedSource(creep);
     if (!source)
         return;
@@ -446,6 +451,23 @@ function deliver$1(creep) {
         if (creep.transfer(hub, RESOURCE_ENERGY) === ERR_NOT_IN_RANGE) {
             moveTo(creep, hub, { reusePath: 5 });
         }
+        return;
+    }
+    // No hub container (e.g. it decayed) — move near spawn and drop so builders
+    // and other roles can pick it up from the ground rather than haulers idling full.
+    // Prefer tiles that already have a dropped pile so energy concentrates in one spot.
+    const spawn = creep.room.find(FIND_MY_SPAWNS)[0];
+    if (!spawn)
+        return;
+    const nearbyPile = spawn.pos.findInRange(FIND_DROPPED_RESOURCES, 3, {
+        filter: r => r.resourceType === RESOURCE_ENERGY,
+    }).sort((a, b) => b.amount - a.amount)[0];
+    const dropTarget = nearbyPile ? nearbyPile.pos : spawn.pos;
+    if (creep.pos.isEqualTo(dropTarget)) {
+        creep.drop(RESOURCE_ENERGY);
+    }
+    else if (creep.pos.getRangeTo(dropTarget) > 0) {
+        moveTo(creep, dropTarget, { reusePath: 5, range: 0 });
     }
 }
 function needsEnergy(s) {
@@ -651,6 +673,16 @@ function runBuilder(creep) {
         if (site) {
             if (creep.build(site) === ERR_NOT_IN_RANGE) {
                 moveTo(creep, site, { reusePath: 5 });
+            }
+            return;
+        }
+        // Repair containers first — prevent hub container from decaying away
+        const damagedContainer = creep.pos.findClosestByPath(FIND_STRUCTURES, {
+            filter: s => s.structureType === STRUCTURE_CONTAINER && s.hits < s.hitsMax * 0.5,
+        });
+        if (damagedContainer) {
+            if (creep.repair(damagedContainer) === ERR_NOT_IN_RANGE) {
+                moveTo(creep, damagedContainer, { reusePath: 5 });
             }
             return;
         }
@@ -1135,6 +1167,22 @@ function deposit(creep) {
         if (creep.transfer(fillTarget, RESOURCE_ENERGY) === ERR_NOT_IN_RANGE) {
             moveTo(creep, fillTarget, { reusePath: 5 });
         }
+        return;
+    }
+    // No containers or structures to fill — drop near spawn, preferring tiles that
+    // already have a pile so energy concentrates in one spot for builders to collect.
+    const spawn = creep.room.find(FIND_MY_SPAWNS)[0];
+    if (!spawn)
+        return;
+    const nearbyPile = spawn.pos.findInRange(FIND_DROPPED_RESOURCES, 3, {
+        filter: r => r.resourceType === RESOURCE_ENERGY,
+    }).sort((a, b) => b.amount - a.amount)[0];
+    const dropTarget = nearbyPile ? nearbyPile.pos : spawn.pos;
+    if (creep.pos.isEqualTo(dropTarget)) {
+        creep.drop(RESOURCE_ENERGY);
+    }
+    else {
+        moveTo(creep, dropTarget, { reusePath: 5, range: 0 });
     }
 }
 function isHome$3(creep) {
@@ -2319,9 +2367,10 @@ function resetToEconomy(room) {
 
 // Dynamic body builder — scales creep bodies to the available energy budget.
 // Part ordering follows Screeps convention: TOUGH first (absorbs damage), MOVE last (stays mobile longest).
-function buildBody(role, budget) {
+function buildBody(role, budget, opts) {
+    var _a;
     switch (role) {
-        case 'harvester': return harvesterBody(budget);
+        case 'harvester': return harvesterBody(budget, (_a = opts === null || opts === void 0 ? void 0 : opts.mobile) !== null && _a !== void 0 ? _a : false);
         case 'hauler': return haulerBody(budget);
         case 'upgrader': return upgraderBody(budget);
         case 'builder':
@@ -2338,9 +2387,16 @@ function buildBody(role, budget) {
     }
 }
 // ─── Economic roles ───────────────────────────────────────────────────────────
-// Stationary harvester: maximize WORK (source saturation = 6 WORK = 12e/tick).
-// Minimal CARRY + MOVE — it barely moves once assigned to a source.
-function harvesterBody(budget) {
+// Harvester body: stationary by default (parks at source container, maximises WORK).
+// Pass mobile:true when no containers exist (RC1 bootstrap or after containers are lost) —
+// the harvester must walk to deliver, so it needs road-speed movement.
+function harvesterBody(budget, mobile) {
+    if (mobile) {
+        // [W, C, M, M] = 250e: 1:1 non-MOVE:MOVE ratio → full road speed
+        if (budget < 250)
+            return null;
+        return [WORK, CARRY, MOVE, MOVE];
+    }
     if (budget < 200)
         return null;
     const w = Math.min(Math.floor((budget - 100) / 100), 6); // reserve 100 for CARRY+MOVE
@@ -2464,6 +2520,7 @@ function r(part, n) {
 //   • GCL allows another room
 //   • A suitable unowned room is in our intel
 const MIN_RCL_TO_EXPAND = 4;
+const BOOTSTRAP_HARVESTERS = 2;
 const BOOTSTRAP_HAULERS = 2;
 const BOOTSTRAP_BUILDERS = 2;
 function manageExpansion(mainRoom) {
@@ -2513,8 +2570,14 @@ function manageExpansion(mainRoom) {
                 break;
             }
             if (newRoom.find(FIND_MY_SPAWNS).length > 0) {
-                Memory.expansionState = 'ACTIVE';
-                console.log(`[adaptive] Expansion -> ACTIVE ${roomName}`);
+                // Delay ACTIVE until the new room has at least one harvester homed to it.
+                // Without this, rooms that already have a spawn skip BOOTSTRAPPING entirely,
+                // leaving them with no harvesters and a spawn that can't afford to spawn one.
+                const hasHomeHarvester = Object.values(Game.creeps).some(c => c.memory.homeRoom === roomName && c.memory.role === 'harvester');
+                if (hasHomeHarvester) {
+                    Memory.expansionState = 'ACTIVE';
+                    console.log(`[adaptive] Expansion -> ACTIVE ${roomName}`);
+                }
             }
             // spawnManager sends bootstrap workers from main room
             break;
@@ -2539,15 +2602,17 @@ function findExpansionTarget() {
         .sort((a, b) => { var _a, _b; return ((_a = b[1].sourceCount) !== null && _a !== void 0 ? _a : 0) - ((_b = a[1].sourceCount) !== null && _b !== void 0 ? _b : 0); }); // prefer 2-source rooms
     return candidates.length > 0 ? candidates[0][0] : null;
 }
-// How many bootstrap workers the main room should send to the new room
+// How many bootstrap workers the main room should send to the new room.
+// Harvesters are included so the new room's spawn gets filled before ACTIVE state.
 function bootstrapTargets() {
     if (Memory.expansionState !== 'BOOTSTRAPPING')
-        return { hauler: 0, builder: 0 };
+        return { harvester: 0, hauler: 0, builder: 0 };
     const roomName = Memory.expansionRoomName;
     if (!roomName)
-        return { hauler: 0, builder: 0 };
-    const inNewRoom = Object.values(Game.creeps).filter(c => c.memory.targetRoomName === roomName);
+        return { harvester: 0, hauler: 0, builder: 0 };
+    const inNewRoom = Object.values(Game.creeps).filter(c => c.memory.homeRoom === roomName);
     return {
+        harvester: Math.max(0, BOOTSTRAP_HARVESTERS - inNewRoom.filter(c => c.memory.role === 'harvester').length),
         hauler: Math.max(0, BOOTSTRAP_HAULERS - inNewRoom.filter(c => c.memory.role === 'hauler').length),
         builder: Math.max(0, BOOTSTRAP_BUILDERS - inNewRoom.filter(c => c.memory.role === 'builder').length),
     };
@@ -2942,6 +3007,13 @@ function manageSpawns(room) {
     const combat = COMBAT_TARGETS[phase];
     // Safe mode: no combat units
     const inSafeMode = ((_d = (_c = room.controller) === null || _c === void 0 ? void 0 : _c.safeMode) !== null && _d !== void 0 ? _d : 0) > 0;
+    // ── Bootstrap: zero creeps → always spawn harvester first ────────────────
+    // Guards against the emergency-upgrader check firing on a freshly claimed room
+    // before any energy infrastructure exists.
+    if (allHomeCreeps.length === 0) {
+        trySpawn(spawn, 'harvester', room.energyAvailable);
+        return;
+    }
     // ── Expansion priority ────────────────────────────────────────────────────
     if (Memory.expansionState === 'CLAIMING' && counts.claimer === 0 && Memory.expansionTarget) {
         trySpawn(spawn, 'claimer', room.energyAvailable, { targetRoomName: Memory.expansionTarget });
@@ -2949,12 +3021,20 @@ function manageSpawns(room) {
     }
     if (Memory.expansionState === 'BOOTSTRAPPING') {
         const bt = bootstrapTargets();
+        const expRoom = Memory.expansionRoomName;
+        // Bootstrap workers are homed to the expansion room so the new room's spawn
+        // manager counts them (prevents over-spawning) and harvesters use mobile mode
+        // to deliver energy directly to the new room's spawn.
+        if (bt.harvester > 0) {
+            trySpawn(spawn, 'harvester', room.energyAvailable, { homeRoom: expRoom, targetRoomName: expRoom });
+            return;
+        }
         if (bt.builder > 0) {
-            trySpawn(spawn, 'builder', room.energyAvailable, { targetRoomName: Memory.expansionRoomName });
+            trySpawn(spawn, 'builder', room.energyAvailable, { homeRoom: expRoom, targetRoomName: expRoom });
             return;
         }
         if (bt.hauler > 0) {
-            trySpawn(spawn, 'hauler', room.energyAvailable, { targetRoomName: Memory.expansionRoomName });
+            trySpawn(spawn, 'hauler', room.energyAvailable, { homeRoom: expRoom, targetRoomName: expRoom });
             return;
         }
     }
@@ -3137,16 +3217,20 @@ function pruneExcessCreeps(room) {
             }
         }
     }
-    // Emergency energy: suicide the largest upgrader only.
-    // Scouts are excluded — a [MOVE] body costs nothing to maintain (no CPU overhead,
-    // no energy drain) and losing scout coverage means losing remote-room intel.
+    // Emergency energy: suicide the largest upgrader only — but only when harvesters
+    // are present to actually generate more energy. Without harvesters, killing the
+    // upgrader doesn't help and causes a spawn-kill death spiral (200e upgrader spawns,
+    // drains to CRITICAL, gets killed, repeat).
     if ((status === null || status === void 0 ? void 0 : status.level) === 'CRITICAL') {
-        const expensive = creeps
-            .filter(c => c.memory.role === 'upgrader')
-            .sort((a, b) => (b.body.length) - (a.body.length));
-        if (expensive.length > 0) {
-            console.log(`[adaptive] CRITICAL energy — retiring upgrader`);
-            expensive[0].suicide();
+        const harvesters = creeps.filter(c => c.memory.role === 'harvester');
+        if (harvesters.length > 0) {
+            const expensive = creeps
+                .filter(c => c.memory.role === 'upgrader')
+                .sort((a, b) => (b.body.length) - (a.body.length));
+            if (expensive.length > 0) {
+                console.log(`[adaptive] CRITICAL energy — retiring upgrader`);
+                expensive[0].suicide();
+            }
         }
     }
     // Cull any role more than 2× its dynamic target
@@ -3222,7 +3306,9 @@ function findDeficitNeighbor(room) {
 }
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 function trySpawn(spawn, role, energy, extraMemory = {}) {
-    const body = buildBody(role, energy);
+    const hasContainers = spawn.room.find(FIND_STRUCTURES)
+        .some(s => s.structureType === STRUCTURE_CONTAINER);
+    const body = buildBody(role, energy, { mobile: role === 'harvester' && !hasContainers });
     if (!body)
         return;
     const name = `${role}_${Game.time}`;
@@ -4518,7 +4604,7 @@ function manageObserver(room) {
 }
 
 // Updated automatically by `just deploy` — do not edit manually
-const REGIME = '2026-06-03-ee3e78a';
+const REGIME = '2026-06-04-4a2d67a';
 
 const REPORT_INTERVAL = 50;
 const LOG_INTERVAL = 200;

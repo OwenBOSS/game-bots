@@ -103,10 +103,12 @@ export function runMonteCarlo(initialState, opts = {}) {
   const calibration = loadCalibration();
 
   // Per-step accumulators: [stepIndex] = values across runs
-  const energyByStep   = Array.from({ length: steps }, () => []);
-  const ctrlPctByStep  = Array.from({ length: steps }, () => []);
-  const creepTotByStep = Array.from({ length: steps }, () => []);
-  const rclByStep      = Array.from({ length: steps }, () => []);
+  const energyByStep       = Array.from({ length: steps }, () => []);
+  const ctrlPctByStep      = Array.from({ length: steps }, () => []);
+  const ctrlCumulativeByStep = Array.from({ length: steps }, () => []);
+  const creepTotByStep     = Array.from({ length: steps }, () => []);
+  const rclByStep          = Array.from({ length: steps }, () => []);
+  const startRcl = initialState.rcl ?? 1;
 
   // Milestone accumulators (first tick each milestone is reached, Infinity if never)
   const rcl3Ticks   = [];
@@ -127,6 +129,7 @@ export function runMonteCarlo(initialState, opts = {}) {
     snaps.forEach((s, i) => {
       energyByStep[i].push(s.energy.avail);
       ctrlPctByStep[i].push(s.ctrl.pct);
+      ctrlCumulativeByStep[i].push((s.rcl - startRcl) * 100 + s.ctrl.pct);
       creepTotByStep[i].push(Object.values(s.creeps).reduce((a, b) => a + b, 0));
       rclByStep[i].push(s.rcl);
 
@@ -299,10 +302,12 @@ export function runMonteCarlo(initialState, opts = {}) {
     stepSize,
     checkpoints,
 
-    energy:     bandsFor(energyByStep),
-    ctrlPct:    bandsFor(ctrlPctByStep),
-    creepTotal: bandsFor(creepTotByStep),
-    rcl:        bandsFor(rclByStep),
+    energy:          bandsFor(energyByStep),
+    ctrlPct:         bandsFor(ctrlPctByStep),
+    ctrlCumulative:  bandsFor(ctrlCumulativeByStep),
+    creepTotal:      bandsFor(creepTotByStep),
+    rcl:             bandsFor(rclByStep),
+    startRcl,
 
     milestones: {
       rcl3:             milestoneStats(rcl3Ticks),

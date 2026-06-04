@@ -44,6 +44,7 @@ function trackScores(room) {
     // Scan room for current scores
     const scores = room.find(FIND_SCORES);
     const totalScore = scores.reduce((sum, s) => sum + s.score, 0);
+    const wasInMap = !!Memory.scoreMap[room.name];
     for (const score of scores) {
         Memory.scoreCache[score.id] = {
             pos: { x: score.pos.x, y: score.pos.y, roomName: room.name },
@@ -53,9 +54,13 @@ function trackScores(room) {
     }
     if (totalScore > 0) {
         Memory.scoreMap[room.name] = { score: totalScore, tick: Game.time };
+        if (!wasInMap) {
+            console.log(`[scoreTracker] New score room: ${room.name} (${scores.length} scores, total=${totalScore})`);
+        }
     }
     else if (Memory.scoreMap[room.name]) {
         delete Memory.scoreMap[room.name];
+        console.log(`[scoreTracker] Scores cleared from ${room.name}`);
     }
 }
 
@@ -63,30 +68,24 @@ function trackScores(room) {
 // Collector bodies use MOVE+TOUGH (no CARRY — Scores are collected by stepping on tile).
 // Bodies are returned in Screeps-legal order: TOUGH first, then MOVE last.
 function buildCollectorBody(energy) {
-    // RC5+ tier: [TOUGH×10, ATTACK×2, MOVE×10] — 660e
-    if (energy >= 660) {
-        return [
-            TOUGH, TOUGH, TOUGH, TOUGH, TOUGH,
-            TOUGH, TOUGH, TOUGH, TOUGH, TOUGH,
-            ATTACK, ATTACK,
-            MOVE, MOVE, MOVE, MOVE, MOVE,
-            MOVE, MOVE, MOVE, MOVE, MOVE,
-        ];
-    }
-    // RC3-4 tier: [TOUGH×5, MOVE×5] — 300e
-    if (energy >= 300) {
-        return [TOUGH, TOUGH, TOUGH, TOUGH, TOUGH, MOVE, MOVE, MOVE, MOVE, MOVE];
-    }
-    // RC1-2 tier: [TOUGH, MOVE×3] — 160e
-    if (energy >= 160) {
-        return [TOUGH, MOVE, MOVE, MOVE];
-    }
+    // Speed + carry — CARRY is required for pickup(); MOVE-heavy for fast cross-room travel.
+    // 600e: CARRY×2, MOVE×6 — full-road speed, 100 carry
+    if (energy >= 600)
+        return [CARRY, CARRY, MOVE, MOVE, MOVE, MOVE, MOVE, MOVE];
+    // 350e: CARRY×1, MOVE×5 — fast, 50 carry
+    if (energy >= 350)
+        return [CARRY, MOVE, MOVE, MOVE, MOVE, MOVE];
+    // 200e: CARRY×1, MOVE×3 — minimum viable collector
+    if (energy >= 200)
+        return [CARRY, MOVE, MOVE, MOVE];
     return null;
 }
 function buildScoutBody(energy) {
-    if (energy < 50)
-        return null;
-    return [MOVE];
+    if (energy >= 250)
+        return [MOVE, MOVE, MOVE, MOVE, MOVE]; // 1500 tick lifespan
+    if (energy >= 50)
+        return [MOVE];
+    return null;
 }
 function buildHunterBody(energy) {
     // [ATTACK×3, MOVE×3] — 390e, 30 DPS, fast enough to intercept collectors
@@ -117,6 +116,24 @@ function buildHarvesterBody(energy) {
         return [WORK, CARRY, MOVE];
     return null;
 }
+function buildUpgraderBody(energy) {
+    if (energy >= 400)
+        return [WORK, WORK, CARRY, CARRY, MOVE, MOVE];
+    if (energy >= 200)
+        return [WORK, CARRY, MOVE];
+    return null;
+}
+function buildDefenderBody(energy) {
+    // Melee defender — TOUGH padding + ATTACK DPS + MOVE parity.
+    // Parts ordered: TOUGH first, then ATTACK, then MOVE (Screeps requirement).
+    if (energy >= 730)
+        return [TOUGH, TOUGH, TOUGH, ATTACK, ATTACK, ATTACK, ATTACK, ATTACK, MOVE, MOVE, MOVE, MOVE, MOVE, MOVE]; // 14 parts, 150 DPS
+    if (energy >= 390)
+        return [TOUGH, TOUGH, ATTACK, ATTACK, ATTACK, MOVE, MOVE, MOVE]; // 8 parts, 90 DPS
+    if (energy >= 260)
+        return [ATTACK, ATTACK, MOVE, MOVE]; // minimum viable
+    return null;
+}
 function buildBuilderBody(energy) {
     // Builder needs CARRY-heavy body — withdraws from containers and makes long build trips.
     // More CARRY = fewer round-trips = more time building.
@@ -130,7 +147,7 @@ function buildBuilderBody(energy) {
 }
 
 // Season 10 spawn manager — RC-level aware, uses bodyBuilder for correct body selection.
-// Priority: harvesters → scouts (RC1) → builder (RC2+) → collectors → hunters (conditional).
+// Priority: harvesters → scouts → builder → upgrader → haulers → collectors → hunters.
 const MIN_HARVESTERS = 2;
 const MAX_BUILDERS = 1; // one builder until infrastructure is complete
 function getCollectorQuota(room) {
@@ -159,43 +176,79 @@ function manageSpawns(room) {
     const scouts = creeps.filter((c) => c.memory.role === 'scout').length;
     const haulers = creeps.filter((c) => c.memory.role === 'hauler').length;
     const builders = creeps.filter((c) => c.memory.role === 'builder').length;
+    const upgraders = creeps.filter((c) => c.memory.role === 'upgrader').length;
     const hunters = creeps.filter((c) => c.memory.role === 'hunter').length;
+    const defenders = creeps.filter((c) => c.memory.role === 'defender').length;
     const level = (_b = (_a = room.controller) === null || _a === void 0 ? void 0 : _a.level) !== null && _b !== void 0 ? _b : 1;
     const mem = room.memory;
+    const e = room.energyAvailable;
     // 1. Always maintain minimum harvesters first
     if (harvesters < MIN_HARVESTERS) {
-        trySpawn(spawn, 'harvester', buildHarvesterBody(room.energyAvailable));
-        return;
+        const body = buildHarvesterBody(e);
+        if (body) {
+            trySpawn(spawn, 'harvester', body);
+            return;
+        }
     }
-    // 2. RC1: spawn one scout immediately if flagged
-    if (level === 1 && mem.spawnScoutNext && scouts === 0) {
-        trySpawn(spawn, 'scout', buildScoutBody(room.energyAvailable));
-        return;
+    // 1.5. Spawn defenders when armed hostiles are in the room — higher priority than economy
+    {
+        const armed = findCached(room, FIND_HOSTILE_CREEPS).filter((h) => h.body.some(p => p.type === ATTACK || p.type === RANGED_ATTACK || p.type === WORK));
+        if (armed.length > 0 && defenders < 2) {
+            const body = buildDefenderBody(e);
+            if (body) {
+                trySpawn(spawn, 'defender', body, { homeRoom: room.name });
+                return;
+            }
+        }
     }
-    // 3. RC2+: keep one builder when there are active construction sites
+    // 2. Keep one builder when there are active construction sites (any RC)
     const hasSites = findCached(room, FIND_CONSTRUCTION_SITES).length > 0;
-    if (level >= 2 && builders < MAX_BUILDERS && hasSites) {
-        trySpawn(spawn, 'builder', buildBuilderBody(room.energyAvailable));
-        return;
+    if (builders < MAX_BUILDERS && hasSites) {
+        const body = buildBuilderBody(e);
+        if (body) {
+            trySpawn(spawn, 'builder', body);
+            return;
+        }
     }
-    // 4. Haulers: 1 per source, but only once containers exist
-    const allStructures = findCached(room, FIND_STRUCTURES);
+    // 3. Always keep one upgrader (controller progress = more spawn capacity)
+    if (upgraders < 1) {
+        const body = buildUpgraderBody(e);
+        if (body) {
+            trySpawn(spawn, 'upgrader', body);
+            return;
+        }
+    }
+    // 4. Haulers: 1 per source — picks up dropped energy even before containers exist
     const sourceCount = findCached(room, FIND_SOURCES).length;
-    const hasContainers = allStructures.some((s) => s.structureType === STRUCTURE_CONTAINER);
-    if (hasContainers && haulers < sourceCount) {
-        trySpawn(spawn, 'hauler', buildHaulerBody(room.energyAvailable));
-        return;
+    if (haulers < sourceCount) {
+        const body = buildHaulerBody(e);
+        if (body) {
+            trySpawn(spawn, 'hauler', body);
+            return;
+        }
     }
-    // 5. Determine collector quota
+    // 5. Scout — after production roles; [MOVE×5] lasts 1500 ticks so low churn
+    if (scouts === 0) {
+        const body = buildScoutBody(e);
+        if (body) {
+            trySpawn(spawn, 'scout', body);
+            return;
+        }
+    }
+    // 6. Collectors
     const quota = resolveCollectorQuota(room, level, mem);
-    // 6. Spawn collector if under quota — set homeRoom so idle collectors return correctly
     if (collectors < quota) {
-        trySpawn(spawn, 'collector', buildCollectorBody(room.energyAvailable), { homeRoom: room.name });
-        return;
+        const body = buildCollectorBody(e);
+        if (body) {
+            trySpawn(spawn, 'collector', body, { homeRoom: room.name });
+            return;
+        }
     }
-    // 7. Spawn hunter if enemy collectors detected near Score rooms (RC3+)
+    // 7. Hunter if enemy collectors detected near Score rooms (RC3+)
     if (level >= 3 && hunters < 1 && enemiesNearScores()) {
-        trySpawn(spawn, 'hunter', buildHunterBody(room.energyAvailable));
+        const body = buildHunterBody(e);
+        if (body)
+            trySpawn(spawn, 'hunter', body);
     }
 }
 function resolveCollectorQuota(room, level, mem) {
@@ -203,14 +256,14 @@ function resolveCollectorQuota(room, level, mem) {
         return getCollectorQuota(room);
     if (mem.collectorQuota !== undefined)
         return mem.collectorQuota;
-    // Defaults by level
+    // Defaults by level — keep economy-first at low RC
     if (level >= 5)
         return 5;
     if (level >= 3)
         return 3;
     if (level >= 2)
-        return 1;
-    return 1; // RC1: spawn one collector immediately — scores are the entire point
+        return 2;
+    return 2; // RC1: two collectors while waiting for containers/builder
 }
 function enemiesNearScores() {
     var _a;
@@ -227,7 +280,11 @@ function trySpawn(spawn, role, body, extraMem = {}) {
     if (!body)
         return;
     const name = `${role}_${Game.time}`;
-    spawn.spawnCreep(body, name, { memory: { role, working: false, ...extraMem } });
+    const result = spawn.spawnCreep(body, name, { memory: { role, working: false, ...extraMem } });
+    if (result === OK) {
+        const cost = body.reduce((s, p) => s + BODYPART_COST[p], 0);
+        console.log(`[season10] Spawning ${name} [${body.join(',')}] (${cost}e)`);
+    }
 }
 
 // Fires once per RC level-up. Stores the new level in room.memory.rcLevel and
@@ -244,27 +301,32 @@ function checkRCTransition(room) {
 }
 function onRCLevelUp(room, level) {
     var _a;
+    console.log(`[${room.name}] RC${level} reached at tick ${Game.time}`);
     switch (level) {
         case 1:
             room.memory.spawnScoutNext = true;
+            console.log(`[${room.name}] RC1 — queuing scout`);
             break;
         case 2:
             if (!Memory.scoreCache)
                 Memory.scoreCache = {};
+            console.log(`[${room.name}] RC2 — score cache enabled`);
             break;
         case 3:
             room.memory.collectorQuota = 3;
+            console.log(`[${room.name}] RC3 — collector quota → 3`);
             break;
         case 4:
             room.memory.dynamicCollectorQuota = true;
+            console.log(`[${room.name}] RC4 — dynamic collector quota enabled`);
             break;
         case 8:
             room.memory.observerEnabled = true;
-            // Populate observer targets from adjacent rooms
             const exits = Game.map.describeExits(room.name);
             if (exits) {
                 const adjacent = Object.values(exits).filter((r) => !!r);
                 Memory.observerTargets = [...new Set([...((_a = Memory.observerTargets) !== null && _a !== void 0 ? _a : []), ...adjacent])];
+                console.log(`[${room.name}] RC8 — observer enabled, targets: ${adjacent.join(', ')}`);
             }
             break;
     }
@@ -282,10 +344,10 @@ const MAX_EXTENSIONS_BY_LEVEL = {
 function manageConstruction(room) {
     var _a, _b;
     const level = (_b = (_a = room.controller) === null || _a === void 0 ? void 0 : _a.level) !== null && _b !== void 0 ? _b : 0;
-    if (level < 2)
+    if (level < 1)
         return;
-    if (level >= 2)
-        placeSourceContainers(room);
+    placeSourceContainers(room); // containers available at RC1
+    placeSpawnRamparts(room); // ramparts over spawn/towers — available from RC1, critical for survival
     if (level >= 2)
         placeExtensions(room); // gated behind container completion internally
     if (level >= 3)
@@ -295,29 +357,67 @@ function manageConstruction(room) {
     if (level >= 4)
         placeStorageSite(room);
 }
+function placeSpawnRamparts(room) {
+    // Place ramparts on spawn and any towers — structures under ramparts take no damage.
+    // Ramparts decay at 300 hits/tick; tower manager keeps them above RAMPART_MIN_HITS.
+    const targets = [
+        ...findCached(room, FIND_MY_SPAWNS),
+        ...findCached(room, FIND_MY_STRUCTURES).filter((s) => s.structureType === STRUCTURE_TOWER),
+    ];
+    for (const target of targets) {
+        const { x, y } = target.pos;
+        const hasRampart = room.lookForAt(LOOK_STRUCTURES, x, y).some((s) => s.structureType === STRUCTURE_RAMPART);
+        if (hasRampart)
+            continue;
+        const hasSite = room.lookForAt(LOOK_CONSTRUCTION_SITES, x, y).some((s) => s.structureType === STRUCTURE_RAMPART);
+        if (!hasSite)
+            room.createConstructionSite(x, y, STRUCTURE_RAMPART);
+    }
+}
 function placeSourceContainers(room) {
     const mem = room.memory;
-    // Re-check every 201 ticks — containers can decay and need to be re-placed
-    if (mem.containerSitesPlaced && Game.time % 201 !== 0)
-        return;
     const sources = findCached(room, FIND_SOURCES);
     const allStructures = findCached(room, FIND_STRUCTURES);
     const existingContainers = allStructures.filter((s) => s.structureType === STRUCTURE_CONTAINER);
     const existingSites = findCached(room, FIND_CONSTRUCTION_SITES).filter((s) => s.structureType === STRUCTURE_CONTAINER);
-    let placed = false;
-    let allCovered = true;
+    // If already fully covered, skip (re-validate every 201 ticks in case containers decayed)
+    const allCovered = sources.every((source) => {
+        const { x, y } = source.pos;
+        return [...existingContainers, ...existingSites].some((s) => Math.abs(s.pos.x - x) <= CONTAINER_RANGE && Math.abs(s.pos.y - y) <= CONTAINER_RANGE);
+    });
+    if (allCovered && mem.containerSitesPlaced && Game.time % 201 !== 0)
+        return;
+    if (allCovered) {
+        mem.containerSitesPlaced = true;
+        return;
+    }
+    // Reset flag — we have uncovered sources
+    mem.containerSitesPlaced = false;
     for (const source of sources) {
         const { x, y } = source.pos;
         const alreadyHas = [...existingContainers, ...existingSites].some((s) => Math.abs(s.pos.x - x) <= CONTAINER_RANGE && Math.abs(s.pos.y - y) <= CONTAINER_RANGE);
         if (alreadyHas)
             continue;
-        allCovered = false;
-        const result = room.createConstructionSite(x, Math.max(0, y - 1), STRUCTURE_CONTAINER);
-        if (result === OK)
-            placed = true;
+        // Try tiles adjacent to source, skip walls
+        const candidates = [
+            [x, y - 1], [x, y + 1], [x - 1, y], [x + 1, y],
+            [x - 1, y - 1], [x + 1, y - 1], [x - 1, y + 1], [x + 1, y + 1],
+        ];
+        for (const [cx, cy] of candidates) {
+            if (cx < 1 || cx > 48 || cy < 1 || cy > 48)
+                continue;
+            if (room.lookForAt(LOOK_TERRAIN, cx, cy)[0] === 'wall')
+                continue;
+            if (room.lookForAt(LOOK_STRUCTURES, cx, cy).length > 0)
+                continue;
+            if (room.lookForAt(LOOK_CONSTRUCTION_SITES, cx, cy).length > 0)
+                continue;
+            if (room.createConstructionSite(cx, cy, STRUCTURE_CONTAINER) === OK) {
+                console.log(`[season10] Container site placed near source in ${room.name}`);
+                break;
+            }
+        }
     }
-    if (placed || allCovered)
-        mem.containerSitesPlaced = true;
 }
 function placeExtensions(room) {
     var _a, _b, _c;
@@ -341,26 +441,35 @@ function placeExtensions(room) {
     const spawn = spawns[0];
     if (!spawn)
         return;
-    // Expand outward from spawn in rings to find a free non-wall tile
-    for (let radius = 2; radius <= 8; radius++) {
+    // Honeycomb layout: place extensions on tiles that share spawn's (x+y) parity.
+    // Opposite-parity tiles become roads, giving every extension road access.
+    // Candidates are sorted by Chebyshev distance from spawn so we fill inward-out.
+    const spawnParity = (spawn.pos.x + spawn.pos.y) % 2;
+    const candidates = []; // [dist, x, y]
+    for (let radius = 2; radius <= 9; radius++) {
         for (let dx = -radius; dx <= radius; dx++) {
             for (let dy = -radius; dy <= radius; dy++) {
-                if (Math.abs(dx) !== radius && Math.abs(dy) !== radius)
-                    continue;
+                if (Math.max(Math.abs(dx), Math.abs(dy)) !== radius)
+                    continue; // ring only
                 const x = spawn.pos.x + dx;
                 const y = spawn.pos.y + dy;
                 if (x < 2 || x > 47 || y < 2 || y > 47)
                     continue;
-                if (room.lookForAt(LOOK_TERRAIN, x, y)[0] === 'wall')
-                    continue;
-                if (room.lookForAt(LOOK_STRUCTURES, x, y).length > 0)
-                    continue;
-                if (room.lookForAt(LOOK_CONSTRUCTION_SITES, x, y).length > 0)
-                    continue;
-                if (room.createConstructionSite(x, y, STRUCTURE_EXTENSION) === OK)
-                    return;
+                if ((x + y) % 2 !== spawnParity)
+                    continue; // honeycomb parity
+                candidates.push([radius, x, y]);
             }
         }
+    }
+    for (const [, x, y] of candidates) {
+        if (room.lookForAt(LOOK_TERRAIN, x, y)[0] === 'wall')
+            continue;
+        if (room.lookForAt(LOOK_STRUCTURES, x, y).length > 0)
+            continue;
+        if (room.lookForAt(LOOK_CONSTRUCTION_SITES, x, y).length > 0)
+            continue;
+        if (room.createConstructionSite(x, y, STRUCTURE_EXTENSION) === OK)
+            return;
     }
 }
 function placeSourceRoads(room) {
@@ -402,8 +511,10 @@ function placeTowerSite(room) {
     const hasSite = findCached(room, FIND_CONSTRUCTION_SITES).some((s) => s.structureType === STRUCTURE_TOWER);
     if (hasSite)
         return;
-    if (room.createConstructionSite(25, 23, STRUCTURE_TOWER) === OK)
+    if (room.createConstructionSite(25, 23, STRUCTURE_TOWER) === OK) {
         mem.towerSitePlaced = true;
+        console.log(`[season10] Tower site placed in ${room.name}`);
+    }
 }
 function placeStorageSite(room) {
     const mem = room.memory;
@@ -416,31 +527,82 @@ function placeStorageSite(room) {
     const hasSite = findCached(room, FIND_CONSTRUCTION_SITES).some((s) => s.structureType === STRUCTURE_STORAGE);
     if (hasSite)
         return;
-    if (room.createConstructionSite(25, 25, STRUCTURE_STORAGE) === OK)
+    if (room.createConstructionSite(25, 25, STRUCTURE_STORAGE) === OK) {
         mem.storageSitePlaced = true;
+        console.log(`[season10] Storage site placed in ${room.name}`);
+    }
 }
 
 // Tower logic — runs every tick for each tower in an owned room.
 // Priority (per RC strategy Part 5):
-//   1. Attack any hostile creep
+//   0. Activate safe mode if under attack with no viable defense
+//   1. Attack most dangerous hostile creep
 //   2. Heal any allied creep below 80% hits
-//   3. Repair any rampart below 10,000 hits
+//   3. Repair any rampart below 100,000 hits
 //   4. Repair containers below 50% hits (prevents decay)
 //   5. Repair any road below 50% hits (only if tower energy > 700)
 const HEAL_THRESHOLD = 0.8;
-const RAMPART_MIN_HITS = 10000;
+const RAMPART_MIN_HITS = 100000;
 const ROAD_ENERGY_MIN = 700;
+// Body parts that can deal damage or destroy structures
+const DANGEROUS_PARTS = new Set([ATTACK, RANGED_ATTACK, WORK]);
+function getDps(creep) {
+    let dps = 0;
+    for (const part of creep.body) {
+        if (part.type === ATTACK)
+            dps += 30;
+        if (part.type === RANGED_ATTACK)
+            dps += 10;
+        if (part.type === WORK)
+            dps += 2; // dismantling
+    }
+    return dps;
+}
+function tryActivateSafeMode(room, hostiles) {
+    var _a;
+    const ctrl = room.controller;
+    if (!ctrl || !ctrl.my)
+        return;
+    if (ctrl.safeMode || ctrl.safeModeCooldown)
+        return;
+    if (((_a = ctrl.safeModeAvailable) !== null && _a !== void 0 ? _a : 0) <= 0)
+        return;
+    // Only trigger for hostiles that can actually destroy things
+    const armed = hostiles.filter(h => h.body.some(p => DANGEROUS_PARTS.has(p.type)));
+    if (armed.length === 0)
+        return;
+    const hasTower = findCached(room, FIND_MY_STRUCTURES)
+        .some((s) => s.structureType === STRUCTURE_TOWER);
+    // Trigger if: no tower yet, OR spawn is below half health
+    let trigger = !hasTower;
+    if (!trigger) {
+        const spawn = findCached(room, FIND_MY_SPAWNS)[0];
+        if (spawn && spawn.hits < spawn.hitsMax * 0.5)
+            trigger = true;
+    }
+    if (trigger) {
+        ctrl.activateSafeMode();
+        console.log(`[season10] SAFE MODE activated in ${room.name} — ${armed.length} armed hostiles`);
+    }
+}
 function manageTowers(room) {
     const towers = findCached(room, FIND_MY_STRUCTURES).filter((s) => s.structureType === STRUCTURE_TOWER);
-    if (towers.length === 0)
-        return;
     const hostiles = findCached(room, FIND_HOSTILE_CREEPS);
     const allies = findCached(room, FIND_MY_CREEPS);
     const structs = findCached(room, FIND_STRUCTURES);
+    // Priority 0: safe mode check runs even when there are no towers
+    if (hostiles.length > 0)
+        tryActivateSafeMode(room, hostiles);
+    if (towers.length === 0)
+        return;
+    // Pick the most dangerous target once, reused by all towers this tick
+    const target = hostiles.length > 0
+        ? hostiles.reduce((best, h) => getDps(h) > getDps(best) ? h : best)
+        : null;
     for (const tower of towers) {
-        // Priority 1: attack hostiles
-        if (hostiles.length > 0) {
-            tower.attack(hostiles[0]);
+        // Priority 1: attack most dangerous hostile
+        if (target) {
+            tower.attack(target);
             continue;
         }
         // Priority 2: heal damaged allies
@@ -572,9 +734,16 @@ function runHarvester(creep) {
     const container = findNearbyContainer(source);
     if (container) {
         runStationary(creep, source, container);
+        return;
+    }
+    const hasHauler = creep.room.find(FIND_MY_CREEPS).some((c) => c.memory.role === 'hauler');
+    if (hasHauler) {
+        // Hauler is active — stay at source and drop; hauler will collect
+        runMobile(creep, source);
     }
     else {
-        runMobile(creep, source);
+        // No hauler yet — deliver manually so spawn/controller don't starve
+        runMobileDeliver(creep, source);
     }
 }
 function runStationary(creep, source, container) {
@@ -587,12 +756,14 @@ function runStationary(creep, source, container) {
         creep.transfer(container, RESOURCE_ENERGY);
     }
 }
-function runMobile(creep, source) {
-    if (creep.memory.working && creep.store[RESOURCE_ENERGY] === 0)
-        creep.memory.working = false;
-    if (!creep.memory.working && creep.store.getFreeCapacity() === 0)
-        creep.memory.working = true;
-    if (creep.memory.working) {
+// No container, no hauler: deliver to spawn/controller manually until hauler spawns.
+function runMobileDeliver(creep, source) {
+    const mem = creep.memory;
+    if (mem.working && creep.store[RESOURCE_ENERGY] === 0)
+        mem.working = false;
+    if (!mem.working && creep.store.getFreeCapacity() === 0)
+        mem.working = true;
+    if (mem.working) {
         const target = creep.pos.findClosestByPath(FIND_MY_STRUCTURES, {
             filter: (s) => (s.structureType === STRUCTURE_SPAWN || s.structureType === STRUCTURE_EXTENSION) &&
                 s.store.getFreeCapacity(RESOURCE_ENERGY) > 0,
@@ -601,19 +772,21 @@ function runMobile(creep, source) {
             if (creep.transfer(target, RESOURCE_ENERGY) === ERR_NOT_IN_RANGE) {
                 moveTo(creep, target, { reusePath: 5 });
             }
+            return;
         }
-        else {
-            // Spawn/extensions full — dump into controller to keep progressing
-            const ctrl = creep.room.controller;
-            if (ctrl && creep.upgradeController(ctrl) === ERR_NOT_IN_RANGE) {
-                moveTo(creep, ctrl, { reusePath: 5 });
-            }
+        const ctrl = creep.room.controller;
+        if (ctrl && creep.upgradeController(ctrl) === ERR_NOT_IN_RANGE) {
+            moveTo(creep, ctrl, { reusePath: 5 });
         }
+        return;
     }
-    else {
-        if (creep.harvest(source) === ERR_NOT_IN_RANGE) {
-            moveTo(creep, source, { reusePath: 5 });
-        }
+    if (creep.harvest(source) === ERR_NOT_IN_RANGE)
+        moveTo(creep, source, { reusePath: 5 });
+}
+// No container, hauler present: stay at source and drop energy on the ground.
+function runMobile(creep, source) {
+    if (creep.harvest(source) === ERR_NOT_IN_RANGE) {
+        moveTo(creep, source, { reusePath: 10 });
     }
 }
 function getAssignedSource(creep) {
@@ -710,18 +883,19 @@ function deliver(creep) {
         }
         return;
     }
-    // Priority 2: storage — long-term energy buffer
+    // Priority 2: upgrade controller — RC progression unlocks more spawning capacity
+    const ctrl = creep.room.controller;
+    if (ctrl) {
+        if (creep.upgradeController(ctrl) === ERR_NOT_IN_RANGE)
+            moveTo(creep, ctrl, { reusePath: 5 });
+        return;
+    }
+    // Priority 3: storage overflow
     const storage = creep.room.storage;
     if (storage && storage.store.getFreeCapacity(RESOURCE_ENERGY) > 0) {
         if (creep.transfer(storage, RESOURCE_ENERGY) === ERR_NOT_IN_RANGE) {
             moveTo(creep, storage, { reusePath: 5 });
         }
-        return;
-    }
-    // Priority 3: upgrade controller to keep RC progressing
-    const ctrl = creep.room.controller;
-    if (ctrl && creep.upgradeController(ctrl) === ERR_NOT_IN_RANGE) {
-        moveTo(creep, ctrl, { reusePath: 5 });
     }
 }
 function getBestSourceContainer(room) {
@@ -761,7 +935,14 @@ function runCollector(creep) {
         // Live object available (room is visible)
         const live = Game.getObjectById(mem.targetScoreId);
         if (live) {
-            moveTo(creep, live.pos, { reusePath: 20 });
+            // Try pickup() first; if out of range, move onto the tile
+            const result = creep.pickup(live);
+            if (result === ERR_NOT_IN_RANGE) {
+                moveTo(creep, live.pos, { reusePath: 20, range: 0 });
+            }
+            else if (result === OK) {
+                mem.targetScoreId = null; // collected — pick next target next tick
+            }
             return;
         }
         // Non-visible room: navigate to cached position
@@ -773,11 +954,31 @@ function runCollector(creep) {
         }
         mem.targetScoreId = null;
     }
-    // No known score: patrol toward home room
+    // No cached score ID: move toward the highest-value room in scoreMap
+    // so we get line-of-sight and the scoreTracker can populate the cache.
+    if (Memory.scoreMap) {
+        let bestRoom = null;
+        let bestVal = 0;
+        for (const roomName in Memory.scoreMap) {
+            const entry = Memory.scoreMap[roomName];
+            const dist = Game.map.getRoomLinearDistance(creep.room.name, roomName);
+            const value = entry.score / (dist + 1);
+            if (value > bestVal) {
+                bestVal = value;
+                bestRoom = roomName;
+            }
+        }
+        if (bestRoom) {
+            moveTo(creep, new RoomPosition(25, 25, bestRoom), { reusePath: 30 });
+            return;
+        }
+    }
+    // Truly nothing known: patrol toward home room
     const home = (_c = mem.homeRoom) !== null && _c !== void 0 ? _c : creep.room.name;
     moveTo(creep, new RoomPosition(25, 25, home), { reusePath: 50 });
 }
 function findBestScore(creep) {
+    var _a, _b, _c, _d;
     if (typeof FIND_SCORES === 'undefined')
         return null;
     let bestId = null;
@@ -790,7 +991,8 @@ function findBestScore(creep) {
             const dist = Game.map.getRoomLinearDistance(creep.room.name, roomName);
             if (dist * 2 > score.ticksToDecay * 0.8)
                 continue;
-            const urgency = score.ticksToDecay < 500 ? 2 : 1;
+            const contested = ((_b = (_a = Memory.roomIntel) === null || _a === void 0 ? void 0 : _a[roomName]) === null || _b === void 0 ? void 0 : _b.hasHostiles) ? 2 : 1;
+            const urgency = (score.ticksToDecay < 500 ? 2 : 1) * contested;
             const value = (score.score * urgency) / (dist + 1);
             if (value > bestValue) {
                 bestValue = value;
@@ -810,7 +1012,8 @@ function findBestScore(creep) {
             const ticksLeft = entry.expiresAt - Game.time;
             if (dist * 2 > ticksLeft * 0.8)
                 continue;
-            const urgency = ticksLeft < 500 ? 2 : 1;
+            const contested = ((_d = (_c = Memory.roomIntel) === null || _c === void 0 ? void 0 : _c[entry.pos.roomName]) === null || _d === void 0 ? void 0 : _d.hasHostiles) ? 2 : 1;
+            const urgency = (ticksLeft < 500 ? 2 : 1) * contested;
             const value = (entry.value * urgency) / (dist + 1);
             if (value > bestValue) {
                 bestValue = value;
@@ -821,14 +1024,30 @@ function findBestScore(creep) {
     return bestId;
 }
 
-// Scout role — [MOVE] only. Expands visibility by visiting unexplored adjacent rooms.
-// Registers every room it enters in Memory.knownRooms for collectors to use.
+// Scout role — [MOVE] only. Expands visibility and records room intel (scores, hostiles).
+// Priority: unexplored non-highway rooms → known score rooms → stalest known room.
 function runScout(creep) {
-    // Register current room
     if (!Memory.knownRooms)
         Memory.knownRooms = [];
+    if (!Memory.roomIntel)
+        Memory.roomIntel = {};
     if (!Memory.knownRooms.includes(creep.room.name)) {
         Memory.knownRooms.push(creep.room.name);
+    }
+    recordRoomIntel(creep);
+    // Collect scores in current room — try pickup() first, move onto tile if out of range
+    if (typeof FIND_SCORES !== 'undefined') {
+        const scores = creep.room.find(FIND_SCORES);
+        if (scores.length > 0) {
+            const closest = creep.pos.findClosestByRange(scores);
+            if (closest) {
+                const result = creep.pickup(closest);
+                if (result === ERR_NOT_IN_RANGE) {
+                    moveTo(creep, closest.pos, { reusePath: 5, range: 0 });
+                }
+                return;
+            }
+        }
     }
     const target = pickTarget(creep);
     if (!target)
@@ -840,21 +1059,46 @@ function runScout(creep) {
     if (exit)
         moveTo(creep, exit, { reusePath: 50 });
 }
+function recordRoomIntel(creep) {
+    const hostiles = creep.room.find(FIND_HOSTILE_CREEPS);
+    const scoreCount = typeof FIND_SCORES !== 'undefined'
+        ? creep.room.find(FIND_SCORES).length
+        : 0;
+    Memory.roomIntel[creep.room.name] = {
+        tick: Game.time,
+        hasHostiles: hostiles.length > 0,
+        scoreCount,
+    };
+}
+function isHighway(roomName) {
+    const m = roomName.match(/[EW](\d+)[NS](\d+)/);
+    if (!m)
+        return false;
+    return parseInt(m[1]) % 10 === 0 || parseInt(m[2]) % 10 === 0;
+}
 function pickTarget(creep) {
     var _a, _b, _c;
     const exits = Game.map.describeExits(creep.room.name);
     if (!exits)
         return null;
-    const adjacent = Object.values(exits).filter((r) => !!r);
+    const candidates = Object.values(exits)
+        .filter((r) => !!r)
+        .filter(r => !isHighway(r));
+    if (candidates.length === 0)
+        return null;
     const known = (_a = Memory.knownRooms) !== null && _a !== void 0 ? _a : [];
-    // Prefer unexplored rooms
-    const unexplored = adjacent.filter(r => !known.includes(r));
+    const scoreMap = (_b = Memory.scoreMap) !== null && _b !== void 0 ? _b : {};
+    // Priority 1: unexplored non-highway rooms (discover new score sources)
+    const unexplored = candidates.filter(r => !known.includes(r));
     if (unexplored.length > 0)
         return unexplored[0];
-    // All adjacent known — revisit the room with the oldest (or absent) scoreMap entry.
-    // Rooms never seen in scoreMap get tick=0 and are prioritised for revisit.
-    const scoreMap = (_b = Memory.scoreMap) !== null && _b !== void 0 ? _b : {};
-    return (_c = adjacent.sort((a, b) => { var _a, _b, _c, _d; return ((_b = (_a = scoreMap[a]) === null || _a === void 0 ? void 0 : _a.tick) !== null && _b !== void 0 ? _b : 0) - ((_d = (_c = scoreMap[b]) === null || _c === void 0 ? void 0 : _c.tick) !== null && _d !== void 0 ? _d : 0); })[0]) !== null && _c !== void 0 ? _c : null;
+    // Priority 2: known rooms with active scores (keep them visible for collectors)
+    const scoreRooms = candidates.filter(r => { var _a, _b; return ((_b = (_a = scoreMap[r]) === null || _a === void 0 ? void 0 : _a.score) !== null && _b !== void 0 ? _b : 0) > 0; });
+    if (scoreRooms.length > 0) {
+        return scoreRooms.sort((a, b) => { var _a, _b, _c, _d; return ((_b = (_a = scoreMap[b]) === null || _a === void 0 ? void 0 : _a.score) !== null && _b !== void 0 ? _b : 0) - ((_d = (_c = scoreMap[a]) === null || _c === void 0 ? void 0 : _c.score) !== null && _d !== void 0 ? _d : 0); })[0];
+    }
+    // Priority 3: stalest known room (maintain map freshness)
+    return (_c = candidates.sort((a, b) => { var _a, _b, _c, _d; return ((_b = (_a = scoreMap[a]) === null || _a === void 0 ? void 0 : _a.tick) !== null && _b !== void 0 ? _b : 0) - ((_d = (_c = scoreMap[b]) === null || _c === void 0 ? void 0 : _c.tick) !== null && _d !== void 0 ? _d : 0); })[0]) !== null && _c !== void 0 ? _c : null;
 }
 
 // Builder — handles construction sites (containers, extensions, tower, storage).
@@ -916,7 +1160,19 @@ function runBuilder(creep) {
     }
 }
 function collectEnergy(creep) {
-    // Prefer withdrawing from a container — keeps source tiles free for harvesters
+    // 1. Dropped energy — scan room directly (findClosestByPath filter is unreliable in-engine)
+    const allDropped = creep.room.find(FIND_DROPPED_RESOURCES, {
+        filter: (r) => r.resourceType === RESOURCE_ENERGY && r.amount >= 30,
+    });
+    const dropped = allDropped.length > 0
+        ? allDropped.reduce((a, b) => a.amount >= b.amount ? a : b)
+        : null;
+    if (dropped) {
+        if (creep.pickup(dropped) === ERR_NOT_IN_RANGE)
+            moveTo(creep, dropped, { reusePath: 3 });
+        return;
+    }
+    // 2. Container with energy
     const container = creep.pos.findClosestByPath(FIND_STRUCTURES, {
         filter: (s) => s.structureType === STRUCTURE_CONTAINER &&
             s.store[RESOURCE_ENERGY] >= 50,
@@ -927,12 +1183,11 @@ function collectEnergy(creep) {
         }
         return;
     }
-    // No containers with energy yet — harvest directly as fallback
+    // 3. Harvest directly as last resort
     const source = creep.pos.findClosestByPath(FIND_SOURCES_ACTIVE);
     if (source) {
-        if (creep.harvest(source) === ERR_NOT_IN_RANGE) {
+        if (creep.harvest(source) === ERR_NOT_IN_RANGE)
             moveTo(creep, source, { reusePath: 5 });
-        }
     }
 }
 
@@ -979,8 +1234,82 @@ function findBestTarget(creep) {
     return bestId;
 }
 
-function loop() {
+function runUpgrader(creep) {
+    const mem = creep.memory;
+    if (mem.working && creep.store[RESOURCE_ENERGY] === 0)
+        mem.working = false;
+    if (!mem.working && creep.store.getFreeCapacity() === 0)
+        mem.working = true;
+    if (mem.working) {
+        const ctrl = creep.room.controller;
+        if (!ctrl)
+            return;
+        if (creep.upgradeController(ctrl) === ERR_NOT_IN_RANGE) {
+            moveTo(creep, ctrl, { reusePath: 10 });
+        }
+        return;
+    }
+    // Prefer container near a source (most energy-dense pickup)
+    const container = creep.pos.findClosestByRange(FIND_STRUCTURES, {
+        filter: (s) => s.structureType === STRUCTURE_CONTAINER &&
+            s.store[RESOURCE_ENERGY] > 0,
+    });
+    if (container) {
+        if (creep.withdraw(container, RESOURCE_ENERGY) === ERR_NOT_IN_RANGE) {
+            moveTo(creep, container, { reusePath: 5 });
+        }
+        return;
+    }
+    // No containers yet — pick up dropped energy (harvesters drop it at source)
+    const allDropped = creep.room.find(FIND_DROPPED_RESOURCES, {
+        filter: (r) => r.resourceType === RESOURCE_ENERGY && r.amount > 20,
+    });
+    const dropped = allDropped.length > 0
+        ? allDropped.reduce((a, b) => a.amount >= b.amount ? a : b)
+        : null;
+    if (dropped) {
+        if (creep.pickup(dropped) === ERR_NOT_IN_RANGE)
+            moveTo(creep, dropped, { reusePath: 5 });
+        return;
+    }
+    // Nothing available — wait near sources
+    const source = creep.pos.findClosestByRange(FIND_SOURCES);
+    if (source)
+        moveTo(creep, source, { reusePath: 20, range: 2 });
+}
+
+// Defender role — [TOUGH×N, ATTACK×N, MOVE×N] — guards the home room.
+// Spawned when armed hostiles enter the home room. Idles near spawn when quiet.
+function runDefender(creep) {
     var _a;
+    const homeRoom = (_a = creep.memory.homeRoom) !== null && _a !== void 0 ? _a : creep.room.name;
+    // Return home if pushed out
+    if (creep.room.name !== homeRoom) {
+        const pos = new RoomPosition(25, 25, homeRoom);
+        moveTo(creep, pos, { range: 20 });
+        return;
+    }
+    const hostiles = creep.room.find(FIND_HOSTILE_CREEPS);
+    if (hostiles.length === 0) {
+        // Idle near spawn — don't block roads
+        const spawn = creep.room.find(FIND_MY_SPAWNS)[0];
+        if (spawn && creep.pos.getRangeTo(spawn) > 4) {
+            moveTo(creep, spawn.pos, { range: 3 });
+        }
+        return;
+    }
+    // Prioritize attackers/dismantlers over scouts
+    const armed = hostiles.filter(h => h.body.some(p => p.type === ATTACK || p.type === RANGED_ATTACK || p.type === WORK));
+    const target = creep.pos.findClosestByPath(armed.length > 0 ? armed : hostiles);
+    if (!target)
+        return;
+    if (creep.attack(target) === ERR_NOT_IN_RANGE) {
+        moveTo(creep, target.pos, { reusePath: 2 });
+    }
+}
+
+function loop() {
+    var _a, _b, _c, _d, _e, _f, _g;
     // 1. Reset per-tick find() cache (CPU budget: avoids duplicate room.find calls)
     resetTickCache();
     // 2. Clean up dead creeps from memory
@@ -995,6 +1324,8 @@ function loop() {
         Memory.scoreCache = {};
     if (!Memory.knownRooms)
         Memory.knownRooms = [];
+    if (!Memory.roomIntel)
+        Memory.roomIntel = {};
     if (!Memory.observerTargets)
         Memory.observerTargets = [];
     if (Memory.observerIndex === undefined)
@@ -1041,13 +1372,41 @@ function loop() {
             case 'hunter':
                 runHunter(creep);
                 break;
+            case 'upgrader':
+                runUpgrader(creep);
+                break;
+            case 'defender':
+                runDefender(creep);
+                break;
         }
     }
-    // 7. Debug log every 100 ticks
-    if (Game.time % 100 === 0) {
-        const scoreRooms = Object.keys(Memory.scoreMap).join(', ') || 'none';
-        const cacheSize = Object.keys(Memory.scoreCache).length;
-        console.log(`[season10] tick=${Game.time} score rooms: ${scoreRooms} cached: ${cacheSize}`);
+    // 7. Stats dump every 50 ticks
+    if (Game.time % 50 === 0) {
+        for (const roomName in Game.rooms) {
+            const room = Game.rooms[roomName];
+            if (!((_b = room.controller) === null || _b === void 0 ? void 0 : _b.my))
+                continue;
+            const allCreeps = Object.values(Game.creeps).filter(c => c.room.name === roomName);
+            const counts = {};
+            for (const c of allCreeps) {
+                counts[c.memory.role] = ((_c = counts[c.memory.role]) !== null && _c !== void 0 ? _c : 0) + 1;
+            }
+            const topScoreRooms = Object.entries((_d = Memory.scoreMap) !== null && _d !== void 0 ? _d : {})
+                .sort((a, b) => b[1].score - a[1].score)
+                .slice(0, 3)
+                .map(([r, d]) => `${r}(${d.score})`);
+            console.log(`=== season10:stats:${roomName}:${Game.time} ===`);
+            console.log(JSON.stringify({
+                tick: Game.time,
+                rcl: (_e = room.controller) === null || _e === void 0 ? void 0 : _e.level,
+                energy: { avail: room.energyAvailable, cap: room.energyCapacityAvailable },
+                creeps: counts,
+                totalCreeps: allCreeps.length,
+                scoreRooms: Object.keys((_f = Memory.scoreMap) !== null && _f !== void 0 ? _f : {}).length,
+                topScores: topScoreRooms,
+                cachedScores: Object.keys((_g = Memory.scoreCache) !== null && _g !== void 0 ? _g : {}).length,
+            }));
+        }
     }
 }
 

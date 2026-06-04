@@ -197,6 +197,24 @@ function deliver(creep: Creep): void {
         if (creep.transfer(hub, RESOURCE_ENERGY) === ERR_NOT_IN_RANGE) {
             moveTo(creep, hub, { reusePath: 5 });
         }
+        return;
+    }
+
+    // No hub container (e.g. it decayed) — move near spawn and drop so builders
+    // and other roles can pick it up from the ground rather than haulers idling full.
+    // Prefer tiles that already have a dropped pile so energy concentrates in one spot.
+    const spawn = creep.room.find(FIND_MY_SPAWNS)[0];
+    if (!spawn) return;
+
+    const nearbyPile = spawn.pos.findInRange(FIND_DROPPED_RESOURCES, 3, {
+        filter: r => r.resourceType === RESOURCE_ENERGY,
+    }).sort((a, b) => b.amount - a.amount)[0];
+
+    const dropTarget = nearbyPile ? nearbyPile.pos : spawn.pos;
+    if (creep.pos.isEqualTo(dropTarget)) {
+        creep.drop(RESOURCE_ENERGY);
+    } else if (creep.pos.getRangeTo(dropTarget) > 0) {
+        moveTo(creep, dropTarget, { reusePath: 5, range: 0 });
     }
 }
 

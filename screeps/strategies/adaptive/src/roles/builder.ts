@@ -22,6 +22,17 @@ export function runBuilder(creep: Creep): void {
             return;
         }
 
+        // Repair containers first — prevent hub container from decaying away
+        const damagedContainer = creep.pos.findClosestByPath(FIND_STRUCTURES, {
+            filter: s => s.structureType === STRUCTURE_CONTAINER && s.hits < s.hitsMax * 0.5,
+        });
+        if (damagedContainer) {
+            if (creep.repair(damagedContainer) === ERR_NOT_IN_RANGE) {
+                moveTo(creep, damagedContainer, { reusePath: 5 });
+            }
+            return;
+        }
+
         // Repair roads below 50% before falling back to upgrading
         const damagedRoad = creep.pos.findClosestByPath(FIND_STRUCTURES, {
             filter: s => s.structureType === STRUCTURE_ROAD && s.hits < s.hitsMax * 0.5,

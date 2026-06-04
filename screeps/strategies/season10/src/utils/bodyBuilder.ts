@@ -3,30 +3,20 @@
 // Bodies are returned in Screeps-legal order: TOUGH first, then MOVE last.
 
 export function buildCollectorBody(energy: number): BodyPartConstant[] | null {
-    // RC5+ tier: [TOUGH×10, ATTACK×2, MOVE×10] — 660e
-    if (energy >= 660) {
-        return [
-            TOUGH, TOUGH, TOUGH, TOUGH, TOUGH,
-            TOUGH, TOUGH, TOUGH, TOUGH, TOUGH,
-            ATTACK, ATTACK,
-            MOVE, MOVE, MOVE, MOVE, MOVE,
-            MOVE, MOVE, MOVE, MOVE, MOVE,
-        ];
-    }
-    // RC3-4 tier: [TOUGH×5, MOVE×5] — 300e
-    if (energy >= 300) {
-        return [TOUGH, TOUGH, TOUGH, TOUGH, TOUGH, MOVE, MOVE, MOVE, MOVE, MOVE];
-    }
-    // RC1-2 tier: [TOUGH, MOVE×3] — 160e
-    if (energy >= 160) {
-        return [TOUGH, MOVE, MOVE, MOVE];
-    }
+    // Speed + carry — CARRY is required for pickup(); MOVE-heavy for fast cross-room travel.
+    // 600e: CARRY×2, MOVE×6 — full-road speed, 100 carry
+    if (energy >= 600) return [CARRY, CARRY, MOVE, MOVE, MOVE, MOVE, MOVE, MOVE];
+    // 350e: CARRY×1, MOVE×5 — fast, 50 carry
+    if (energy >= 350) return [CARRY, MOVE, MOVE, MOVE, MOVE, MOVE];
+    // 200e: CARRY×1, MOVE×3 — minimum viable collector
+    if (energy >= 200) return [CARRY, MOVE, MOVE, MOVE];
     return null;
 }
 
 export function buildScoutBody(energy: number): BodyPartConstant[] | null {
-    if (energy < 50) return null;
-    return [MOVE];
+    if (energy >= 250) return [MOVE, MOVE, MOVE, MOVE, MOVE]; // 1500 tick lifespan
+    if (energy >= 50)  return [MOVE];
+    return null;
 }
 
 export function buildHunterBody(energy: number): BodyPartConstant[] | null {
@@ -51,6 +41,21 @@ export function buildHarvesterBody(energy: number): BodyPartConstant[] | null {
     if (energy >= 500) return [WORK, WORK, WORK, WORK, CARRY, MOVE];
     if (energy >= 300) return [WORK, WORK, CARRY, MOVE];
     if (energy >= 200) return [WORK, CARRY, MOVE];
+    return null;
+}
+
+export function buildUpgraderBody(energy: number): BodyPartConstant[] | null {
+    if (energy >= 400) return [WORK, WORK, CARRY, CARRY, MOVE, MOVE];
+    if (energy >= 200) return [WORK, CARRY, MOVE];
+    return null;
+}
+
+export function buildDefenderBody(energy: number): BodyPartConstant[] | null {
+    // Melee defender — TOUGH padding + ATTACK DPS + MOVE parity.
+    // Parts ordered: TOUGH first, then ATTACK, then MOVE (Screeps requirement).
+    if (energy >= 730) return [TOUGH, TOUGH, TOUGH, ATTACK, ATTACK, ATTACK, ATTACK, ATTACK, MOVE, MOVE, MOVE, MOVE, MOVE, MOVE]; // 14 parts, 150 DPS
+    if (energy >= 390) return [TOUGH, TOUGH, ATTACK, ATTACK, ATTACK, MOVE, MOVE, MOVE]; // 8 parts, 90 DPS
+    if (energy >= 260) return [ATTACK, ATTACK, MOVE, MOVE]; // minimum viable
     return null;
 }
 

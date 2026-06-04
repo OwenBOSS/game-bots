@@ -60,7 +60,19 @@ export function runBuilder(creep: Creep): void {
 }
 
 function collectEnergy(creep: Creep): void {
-    // Prefer withdrawing from a container — keeps source tiles free for harvesters
+    // 1. Dropped energy — scan room directly (findClosestByPath filter is unreliable in-engine)
+    const allDropped = creep.room.find(FIND_DROPPED_RESOURCES, {
+        filter: (r: Resource) => r.resourceType === RESOURCE_ENERGY && r.amount >= 30,
+    });
+    const dropped = allDropped.length > 0
+        ? allDropped.reduce((a: Resource, b: Resource) => a.amount >= b.amount ? a : b)
+        : null;
+    if (dropped) {
+        if (creep.pickup(dropped) === ERR_NOT_IN_RANGE) moveTo(creep, dropped, { reusePath: 3 });
+        return;
+    }
+
+    // 2. Container with energy
     const container = creep.pos.findClosestByPath(FIND_STRUCTURES, {
         filter: (s: AnyStructure) =>
             s.structureType === STRUCTURE_CONTAINER &&
@@ -72,11 +84,10 @@ function collectEnergy(creep: Creep): void {
         }
         return;
     }
-    // No containers with energy yet — harvest directly as fallback
+
+    // 3. Harvest directly as last resort
     const source = creep.pos.findClosestByPath(FIND_SOURCES_ACTIVE);
     if (source) {
-        if (creep.harvest(source) === ERR_NOT_IN_RANGE) {
-            moveTo(creep, source, { reusePath: 5 });
-        }
+        if (creep.harvest(source) === ERR_NOT_IN_RANGE) moveTo(creep, source, { reusePath: 5 });
     }
 }

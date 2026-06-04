@@ -257,5 +257,40 @@
     "description": "",
     "deployedAt": "2026-06-03T16:38:54.326Z",
     "gitHash": "ee3e78a"
+  },
+  {
+    "name": "2026-06-03-45eff35",
+    "strategy": "adaptive",
+    "description": "",
+    "deployedAt": "2026-06-03T17:08:14.082Z",
+    "gitHash": "45eff35"
+  },
+  {
+    "name": "2026-06-03-45eff35",
+    "strategy": "season10",
+    "description": "",
+    "deployedAt": "2026-06-03T17:08:17.413Z",
+    "gitHash": "45eff35"
+  },
+  {
+    "name": "2026-06-03-45eff35",
+    "strategy": "adaptive",
+    "description": "",
+    "deployedAt": "2026-06-03T17:16:08.113Z",
+    "gitHash": "45eff35"
+  },
+  {
+    "name": "2026-06-03-45eff35",
+    "strategy": "season10",
+    "description": "",
+    "deployedAt": "2026-06-03T17:16:11.522Z",
+    "gitHash": "45eff35"
+  },
+  {
+    "name": "2026-06-04-4a2d67a",
+    "strategy": "adaptive",
+    "description": "",
+    "deployedAt": "2026-06-04T15:30:56.182Z",
+    "gitHash": "4a2d67a"
   }
 ]

@@ -25,7 +25,13 @@ export function runCollector(creep: Creep): void {
         // Live object available (room is visible)
         const live = Game.getObjectById(mem.targetScoreId as Id<any>) as any;
         if (live) {
-            moveTo(creep, live.pos, { reusePath: 20 });
+            // Try pickup() first; if out of range, move onto the tile
+            const result = creep.pickup(live);
+            if (result === ERR_NOT_IN_RANGE) {
+                moveTo(creep, live.pos, { reusePath: 20, range: 0 });
+            } else if (result === OK) {
+                mem.targetScoreId = null; // collected — pick next target next tick
+            }
             return;
         }
         // Non-visible room: navigate to cached position
@@ -38,7 +44,24 @@ export function runCollector(creep: Creep): void {
         mem.targetScoreId = null;
     }
 
-    // No known score: patrol toward home room
+    // No cached score ID: move toward the highest-value room in scoreMap
+    // so we get line-of-sight and the scoreTracker can populate the cache.
+    if (Memory.scoreMap) {
+        let bestRoom: string | null = null;
+        let bestVal = 0;
+        for (const roomName in Memory.scoreMap) {
+            const entry = Memory.scoreMap[roomName];
+            const dist = Game.map.getRoomLinearDistance(creep.room.name, roomName);
+            const value = entry.score / (dist + 1);
+            if (value > bestVal) { bestVal = value; bestRoom = roomName; }
+        }
+        if (bestRoom) {
+            moveTo(creep, new RoomPosition(25, 25, bestRoom), { reusePath: 30 });
+            return;
+        }
+    }
+
+    // Truly nothing known: patrol toward home room
     const home = mem.homeRoom ?? creep.room.name;
     moveTo(creep, new RoomPosition(25, 25, home), { reusePath: 50 });
 }
@@ -56,8 +79,9 @@ export function findBestScore(creep: Creep): string | null {
         for (const score of scores) {
             const dist = Game.map.getRoomLinearDistance(creep.room.name, roomName);
             if (dist * 2 > score.ticksToDecay * 0.8) continue;
-            const urgency = score.ticksToDecay < 500 ? 2 : 1;
-            const value   = (score.score * urgency) / (dist + 1);
+            const contested = Memory.roomIntel?.[roomName]?.hasHostiles ? 2 : 1;
+            const urgency   = (score.ticksToDecay < 500 ? 2 : 1) * contested;
+            const value     = (score.score * urgency) / (dist + 1);
             if (value > bestValue) { bestValue = value; bestId = score.id as unknown as string; }
         }
     }
@@ -71,8 +95,9 @@ export function findBestScore(creep: Creep): string | null {
             const dist      = Game.map.getRoomLinearDistance(creep.room.name, entry.pos.roomName);
             const ticksLeft = entry.expiresAt - Game.time;
             if (dist * 2 > ticksLeft * 0.8) continue;
-            const urgency = ticksLeft < 500 ? 2 : 1;
-            const value   = (entry.value * urgency) / (dist + 1);
+            const contested = Memory.roomIntel?.[entry.pos.roomName]?.hasHostiles ? 2 : 1;
+            const urgency   = (ticksLeft < 500 ? 2 : 1) * contested;
+            const value     = (entry.value * urgency) / (dist + 1);
             if (value > bestValue) { bestValue = value; bestId = id; }
         }
     }

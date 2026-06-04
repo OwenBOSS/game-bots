@@ -28,7 +28,7 @@ function makeBuilderCreep(opts: {
             [(global as any).RESOURCE_ENERGY]: energy,
             getFreeCapacity: () => cap - energy,
         },
-        room: { name: 'W1N1' },
+        room: { name: 'W1N1', find: vi.fn(() => []) },
         pos: {
             findClosestByPath: vi.fn(() => null),
             getRangeTo: vi.fn(() => 0),
@@ -38,6 +38,7 @@ function makeBuilderCreep(opts: {
         transfer: vi.fn(() => 0),
         repair:   vi.fn(() => 0),
         withdraw: vi.fn(() => 0),
+        pickup:   vi.fn(() => 0),
         moveTo:   vi.fn(() => 0),
     };
 }
@@ -100,22 +101,35 @@ describe('runBuilder — building', () => {
 });
 
 describe('runBuilder — collecting energy', () => {
-    it('withdraws from a container when one is available', () => {
+    it('picks up dropped energy first', () => {
+        const dropped = { id: 'drop1', resourceType: 'energy', amount: 100 };
+        const creep = makeBuilderCreep({ energy: 0, cap: 100, working: false });
+        creep.room.find = vi.fn((type: number) =>
+            type === (global as any).FIND_DROPPED_RESOURCES ? [dropped] : []
+        );
+        runBuilder(creep);
+        expect(creep.pickup).toHaveBeenCalledWith(dropped);
+    });
+
+    it('withdraws from a container when no dropped energy', () => {
         const container = { structureType: 'container', store: { getFreeCapacity: () => 0, energy: 200 } };
         const creep = makeBuilderCreep({ energy: 0, cap: 100, working: false });
-        creep.pos.findClosestByPath = vi.fn(() => container);
+        creep.room.find = vi.fn(() => []); // no dropped energy
+        creep.pos.findClosestByPath = vi.fn((type: number) =>
+            type === (global as any).FIND_STRUCTURES ? container : null
+        );
         runBuilder(creep);
         expect(creep.withdraw).toHaveBeenCalledWith(container, (global as any).RESOURCE_ENERGY);
         expect(creep.harvest).not.toHaveBeenCalled();
     });
 
-    it('harvests nearest active source when no container has energy', () => {
+    it('harvests nearest active source when no dropped energy or container', () => {
         const source = { id: 'src1' };
         const creep = makeBuilderCreep({ energy: 0, cap: 100, working: false });
-        creep.pos.findClosestByPath = vi.fn((type: number) => {
-            if (type === (global as any).FIND_STRUCTURES) return null; // no container
-            return source;
-        });
+        creep.room.find = vi.fn(() => []); // no dropped energy
+        creep.pos.findClosestByPath = vi.fn((type: number) =>
+            type === (global as any).FIND_SOURCES_ACTIVE ? source : null
+        );
         runBuilder(creep);
         expect(creep.harvest).toHaveBeenCalledWith(source);
     });
@@ -123,10 +137,10 @@ describe('runBuilder — collecting energy', () => {
     it('moves to source when harvest returns ERR_NOT_IN_RANGE', () => {
         const source = { id: 'src1' };
         const creep = makeBuilderCreep({ energy: 0, cap: 100, working: false });
-        creep.pos.findClosestByPath = vi.fn((type: number) => {
-            if (type === (global as any).FIND_STRUCTURES) return null;
-            return source;
-        });
+        creep.room.find = vi.fn(() => []); // no dropped energy
+        creep.pos.findClosestByPath = vi.fn((type: number) =>
+            type === (global as any).FIND_SOURCES_ACTIVE ? source : null
+        );
         creep.harvest = vi.fn(() => (global as any).ERR_NOT_IN_RANGE);
         runBuilder(creep);
         expect(creep.moveTo).toHaveBeenCalledWith(source, expect.objectContaining({ reusePath: 5 }));

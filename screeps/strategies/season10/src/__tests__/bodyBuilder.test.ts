@@ -9,46 +9,27 @@ import {
 } from '../utils/bodyBuilder';
 
 describe('buildCollectorBody', () => {
-    it('returns null below 160e', () => {
-        expect(buildCollectorBody(159)).toBeNull();
+    it('returns null below 200e', () => {
+        expect(buildCollectorBody(199)).toBeNull();
         expect(buildCollectorBody(0)).toBeNull();
     });
 
-    it('returns RC1-2 tier [TOUGH, MOVE×3] at 160e–299e', () => {
-        expect(buildCollectorBody(160)).toEqual(['tough', 'move', 'move', 'move']);
-        expect(buildCollectorBody(299)).toEqual(['tough', 'move', 'move', 'move']);
+    it('returns minimum tier [CARRY, MOVE×3] at 200e', () => {
+        expect(buildCollectorBody(200)).toEqual(['carry', 'move', 'move', 'move']);
     });
 
-    it('returns RC3-4 tier [TOUGH×5, MOVE×5] at 300e–659e', () => {
-        const body = buildCollectorBody(300);
-        expect(body).toEqual(['tough', 'tough', 'tough', 'tough', 'tough', 'move', 'move', 'move', 'move', 'move']);
-        expect(buildCollectorBody(659)).toEqual(body);
+    it('returns mid tier [CARRY, MOVE×5] at 350e', () => {
+        expect(buildCollectorBody(350)).toEqual(['carry', 'move', 'move', 'move', 'move', 'move']);
     });
 
-    it('returns RC5+ tier [TOUGH×10, ATTACK×2, MOVE×10] at 660e+', () => {
-        const body = buildCollectorBody(660);
-        expect(body).toEqual([
-            'tough', 'tough', 'tough', 'tough', 'tough',
-            'tough', 'tough', 'tough', 'tough', 'tough',
-            'attack', 'attack',
-            'move', 'move', 'move', 'move', 'move',
-            'move', 'move', 'move', 'move', 'move',
-        ]);
+    it('returns top tier [CARRY×2, MOVE×6] at 600e+', () => {
+        expect(buildCollectorBody(600)).toEqual(['carry', 'carry', 'move', 'move', 'move', 'move', 'move', 'move']);
+        expect(buildCollectorBody(5000)).toEqual(['carry', 'carry', 'move', 'move', 'move', 'move', 'move', 'move']);
     });
 
-    it('RC5+ tier at high budget — correct part counts', () => {
-        const body = buildCollectorBody(5000)!;
-        expect(body.filter(p => p === 'tough')).toHaveLength(10);
-        expect(body.filter(p => p === 'attack')).toHaveLength(2);
-        expect(body.filter(p => p === 'move')).toHaveLength(10);
-    });
-
-    it('TOUGH comes before MOVE in all tiers (damage absorption order)', () => {
-        for (const budget of [160, 300, 660]) {
-            const body = buildCollectorBody(budget)!;
-            const firstTough = body.indexOf('tough');
-            const firstMove  = body.indexOf('move');
-            expect(firstTough).toBeLessThan(firstMove);
+    it('all tiers include CARRY for pickup()', () => {
+        for (const budget of [200, 350, 600]) {
+            expect(buildCollectorBody(budget)).toContain('carry');
         }
     });
 });
@@ -63,8 +44,8 @@ describe('buildScoutBody', () => {
         expect(buildScoutBody(50)).toEqual(['move']);
     });
 
-    it('returns [MOVE] at high budget (scout never scales up)', () => {
-        expect(buildScoutBody(5000)).toEqual(['move']);
+    it('returns [MOVE×5] at 250+ budget for longer lifespan', () => {
+        expect(buildScoutBody(5000)).toEqual(['move', 'move', 'move', 'move', 'move']);
     });
 });
 
