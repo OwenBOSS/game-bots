@@ -14,20 +14,41 @@ const MAX_EXTENSIONS_BY_LEVEL: Record<number, number> = {
 
 export function manageConstruction(room: Room): void {
     const level = room.controller?.level ?? 0;
-    if (level < 2) return;
+    if (level < 1) return;
 
-    if (level >= 2) placeSourceContainers(room);
+    placeSourceContainers(room); // containers available at RC1
+    placeSpawnRamparts(room);    // ramparts over spawn/towers — available from RC1, critical for survival
     if (level >= 2) placeExtensions(room);     // gated behind container completion internally
     if (level >= 3) placeTowerSite(room);
     if (level >= 3) placeSourceRoads(room);
     if (level >= 4) placeStorageSite(room);
 }
 
+function placeSpawnRamparts(room: Room): void {
+    // Place ramparts on spawn and any towers — structures under ramparts take no damage.
+    // Ramparts decay at 300 hits/tick; tower manager keeps them above RAMPART_MIN_HITS.
+    const targets = [
+        ...findCached<StructureSpawn>(room, FIND_MY_SPAWNS),
+        ...findCached<AnyStructure>(room, FIND_MY_STRUCTURES).filter(
+            (s: AnyStructure) => s.structureType === STRUCTURE_TOWER
+        ),
+    ];
+
+    for (const target of targets) {
+        const { x, y } = target.pos;
+        const hasRampart = room.lookForAt(LOOK_STRUCTURES, x, y).some(
+            (s: AnyStructure) => s.structureType === STRUCTURE_RAMPART
+        );
+        if (hasRampart) continue;
+        const hasSite = room.lookForAt(LOOK_CONSTRUCTION_SITES, x, y).some(
+            (s: ConstructionSite) => s.structureType === STRUCTURE_RAMPART
+        );
+        if (!hasSite) room.createConstructionSite(x, y, STRUCTURE_RAMPART);
+    }
+}
+
 function placeSourceContainers(room: Room): void {
     const mem = room.memory as RoomMemory;
-    // Re-check every 201 ticks — containers can decay and need to be re-placed
-    if (mem.containerSitesPlaced && Game.time % 201 !== 0) return;
-
     const sources = findCached<Source>(room, FIND_SOURCES);
     const allStructures = findCached<AnyStructure>(room, FIND_STRUCTURES);
     const existingContainers = allStructures.filter(
@@ -37,8 +58,19 @@ function placeSourceContainers(room: Room): void {
         (s: ConstructionSite) => s.structureType === STRUCTURE_CONTAINER
     );
 
-    let placed = false;
-    let allCovered = true;
+    // If already fully covered, skip (re-validate every 201 ticks in case containers decayed)
+    const allCovered = sources.every((source: Source) => {
+        const { x, y } = source.pos;
+        return [...existingContainers, ...existingSites].some(
+            (s: any) => Math.abs(s.pos.x - x) <= CONTAINER_RANGE && Math.abs(s.pos.y - y) <= CONTAINER_RANGE
+        );
+    });
+    if (allCovered && mem.containerSitesPlaced && Game.time % 201 !== 0) return;
+    if (allCovered) { mem.containerSitesPlaced = true; return; }
+
+    // Reset flag — we have uncovered sources
+    mem.containerSitesPlaced = false;
+
     for (const source of sources) {
         const { x, y } = source.pos;
         const alreadyHas = [...existingContainers, ...existingSites].some(
@@ -46,12 +78,22 @@ function placeSourceContainers(room: Room): void {
         );
         if (alreadyHas) continue;
 
-        allCovered = false;
-        const result = room.createConstructionSite(x, Math.max(0, y - 1), STRUCTURE_CONTAINER);
-        if (result === OK) placed = true;
+        // Try tiles adjacent to source, skip walls
+        const candidates = [
+            [x, y - 1], [x, y + 1], [x - 1, y], [x + 1, y],
+            [x - 1, y - 1], [x + 1, y - 1], [x - 1, y + 1], [x + 1, y + 1],
+        ];
+        for (const [cx, cy] of candidates) {
+            if (cx < 1 || cx > 48 || cy < 1 || cy > 48) continue;
+            if (room.lookForAt(LOOK_TERRAIN, cx, cy)[0] === 'wall') continue;
+            if (room.lookForAt(LOOK_STRUCTURES, cx, cy).length > 0) continue;
+            if (room.lookForAt(LOOK_CONSTRUCTION_SITES, cx, cy).length > 0) continue;
+            if (room.createConstructionSite(cx, cy, STRUCTURE_CONTAINER) === OK) {
+                console.log(`[season10] Container site placed near source in ${room.name}`);
+                break;
+            }
+        }
     }
-
-    if (placed || allCovered) mem.containerSitesPlaced = true;
 }
 
 function placeExtensions(room: Room): void {
@@ -84,20 +126,29 @@ function placeExtensions(room: Room): void {
     const spawn = spawns[0] as StructureSpawn | undefined;
     if (!spawn) return;
 
-    // Expand outward from spawn in rings to find a free non-wall tile
-    for (let radius = 2; radius <= 8; radius++) {
+    // Honeycomb layout: place extensions on tiles that share spawn's (x+y) parity.
+    // Opposite-parity tiles become roads, giving every extension road access.
+    // Candidates are sorted by Chebyshev distance from spawn so we fill inward-out.
+    const spawnParity = (spawn.pos.x + spawn.pos.y) % 2;
+    const candidates: [number, number, number][] = []; // [dist, x, y]
+    for (let radius = 2; radius <= 9; radius++) {
         for (let dx = -radius; dx <= radius; dx++) {
             for (let dy = -radius; dy <= radius; dy++) {
-                if (Math.abs(dx) !== radius && Math.abs(dy) !== radius) continue;
+                if (Math.max(Math.abs(dx), Math.abs(dy)) !== radius) continue; // ring only
                 const x = spawn.pos.x + dx;
                 const y = spawn.pos.y + dy;
                 if (x < 2 || x > 47 || y < 2 || y > 47) continue;
-                if (room.lookForAt(LOOK_TERRAIN, x, y)[0] === 'wall') continue;
-                if (room.lookForAt(LOOK_STRUCTURES, x, y).length > 0) continue;
-                if (room.lookForAt(LOOK_CONSTRUCTION_SITES, x, y).length > 0) continue;
-                if (room.createConstructionSite(x, y, STRUCTURE_EXTENSION) === OK) return;
+                if ((x + y) % 2 !== spawnParity) continue; // honeycomb parity
+                candidates.push([radius, x, y]);
             }
         }
+    }
+
+    for (const [, x, y] of candidates) {
+        if (room.lookForAt(LOOK_TERRAIN, x, y)[0] === 'wall') continue;
+        if (room.lookForAt(LOOK_STRUCTURES, x, y).length > 0) continue;
+        if (room.lookForAt(LOOK_CONSTRUCTION_SITES, x, y).length > 0) continue;
+        if (room.createConstructionSite(x, y, STRUCTURE_EXTENSION) === OK) return;
     }
 }
 
@@ -148,7 +199,10 @@ function placeTowerSite(room: Room): void {
     );
     if (hasSite) return;
 
-    if (room.createConstructionSite(25, 23, STRUCTURE_TOWER) === OK) mem.towerSitePlaced = true;
+    if (room.createConstructionSite(25, 23, STRUCTURE_TOWER) === OK) {
+        mem.towerSitePlaced = true;
+        console.log(`[season10] Tower site placed in ${room.name}`);
+    }
 }
 
 function placeStorageSite(room: Room): void {
@@ -161,5 +215,8 @@ function placeStorageSite(room: Room): void {
     );
     if (hasSite) return;
 
-    if (room.createConstructionSite(25, 25, STRUCTURE_STORAGE) === OK) mem.storageSitePlaced = true;
+    if (room.createConstructionSite(25, 25, STRUCTURE_STORAGE) === OK) {
+        mem.storageSitePlaced = true;
+        console.log(`[season10] Storage site placed in ${room.name}`);
+    }
 }

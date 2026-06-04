@@ -42,7 +42,7 @@ declare global {
     }
 
     interface CreepMemory {
-        role: 'harvester' | 'collector' | 'hauler' | 'scout' | 'hunter' | 'builder';
+        role: 'harvester' | 'collector' | 'hauler' | 'scout' | 'hunter' | 'builder' | 'upgrader' | 'defender';
         working: boolean;
         targetId?: string;
         targetRoom?: string;
@@ -64,14 +64,53 @@ declare global {
         roadSitesPlaced?: boolean;
     }
 
+    interface RoomIntel {
+        tick: number;
+        hasHostiles: boolean;
+        scoreCount: number;
+    }
+
+    interface StatSnapshot {
+        tick: number;
+        rcl: number;
+        energy: { avail: number; cap: number; pct: number };
+        creeps: Record<string, number>;
+        structs: { roads: number; containers: number; extensions: number; towers: number };
+        scores: {
+            activeRooms: number;
+            cacheSize: number;
+            topRooms: Array<{ room: string; score: number }>;
+        };
+        collectors: { count: number; quota: number };
+    }
+
+    interface RoomLayout {
+        tick: number;
+        room: string;
+        rcl: number;
+        sources: Array<{ id: string; x: number; y: number }>;
+        controller: { id: string; x: number; y: number } | null;
+        spawns: Array<{ id: string; name: string; x: number; y: number }>;
+        extensions: Array<{ x: number; y: number }>;
+        containers: Array<{ x: number; y: number; energy: number; capacity: number }>;
+        storage: { x: number; y: number; energy: number; capacity: number } | null;
+        towers: Array<{ x: number; y: number; energy: number }>;
+        roads: Array<{ x: number; y: number }>;
+        sites: Array<{ type: string; x: number; y: number; progress: number; total: number }>;
+        ascii: string;
+    }
+
     interface Memory {
         creeps: Record<string, CreepMemory>;
         rooms: Record<string, RoomMemory>;
         scoreMap: Record<string, { score: number; tick: number }>;
         scoreCache: ScoreCache;
         knownRooms: string[];
+        roomIntel: Record<string, RoomIntel>;
         observerIndex: number;
         observerTargets: string[];
+        statsLog?: StatSnapshot[];
+        roomLayout?: Record<string, RoomLayout>;
     }
 
     // Augment Room.find to accept FIND_SCORES

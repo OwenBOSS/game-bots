@@ -9,6 +9,8 @@ function roomWith(opts: {
     haulers?: number;
     collectors?: number;
     scouts?: number;
+    upgraders?: number;
+    builders?: number;
     storage?: number;
     memory?: any;
     structures?: any[];
@@ -26,12 +28,18 @@ function roomWith(opts: {
     const scouts = Array.from({ length: opts.scouts ?? 0 }, (_, i) =>
         makeCreep({ name: `s${i}`, role: 'scout' })
     );
+    const upgraders = Array.from({ length: opts.upgraders ?? 0 }, (_, i) =>
+        makeCreep({ name: `u${i}`, role: 'upgrader' })
+    );
+    const builders = Array.from({ length: opts.builders ?? 0 }, (_, i) =>
+        makeCreep({ name: `b${i}`, role: 'builder' })
+    );
     const spawn = makeSpawn({ spawning: false });
     return makeRoom({
         energyAvailable: opts.energy ?? 300,
         controller: makeController({ level: opts.level ?? 1 }),
         storage: opts.storage !== undefined ? makeStorage(opts.storage) : undefined,
-        myCreeps: [...harvesters, ...haulers, ...collectors, ...scouts],
+        myCreeps: [...harvesters, ...haulers, ...collectors, ...scouts, ...upgraders, ...builders],
         mySpawns: [spawn],
         structures: opts.structures ?? [],
         sources: opts.sources ?? [],
@@ -92,8 +100,8 @@ describe('manageSpawns — RC1', () => {
         expect(opts.memory.role).toBe('harvester');
     });
 
-    it('spawns a scout when harvesters >= 2 and spawnScoutNext is set and no scout exists', () => {
-        const room = roomWith({ level: 1, energy: 300, harvesters: 2, memory: { spawnScoutNext: true } });
+    it('spawns scout after builder and upgrader are filled', () => {
+        const room = roomWith({ level: 1, energy: 300, harvesters: 2, builders: 1, upgraders: 1 });
         manageSpawns(room);
         const spawn = room.find((global as any).FIND_MY_SPAWNS)[0];
         expect(spawn.spawnCreep).toHaveBeenCalled();
@@ -117,7 +125,7 @@ describe('manageSpawns — RC1', () => {
 
 describe('manageSpawns — RC2', () => {
     it('spawns collector before reaching MAX when harvesters met', () => {
-        const room = roomWith({ level: 2, energy: 300, harvesters: 2, collectors: 0 });
+        const room = roomWith({ level: 2, energy: 300, harvesters: 2, scouts: 1, upgraders: 1, collectors: 0 });
         manageSpawns(room);
         const spawn = room.find((global as any).FIND_MY_SPAWNS)[0];
         expect(spawn.spawnCreep).toHaveBeenCalled();
@@ -125,12 +133,12 @@ describe('manageSpawns — RC2', () => {
         expect(opts.memory.role).toBe('collector');
     });
 
-    it('uses RC1-2 collector body at low energy', () => {
-        const room = roomWith({ level: 2, energy: 160, harvesters: 2, collectors: 0 });
+    it('uses minimum collector body [CARRY, MOVE×3] at 200e', () => {
+        const room = roomWith({ level: 2, energy: 200, harvesters: 2, scouts: 1, upgraders: 1, collectors: 0 });
         manageSpawns(room);
         const spawn = room.find((global as any).FIND_MY_SPAWNS)[0];
         const [body] = spawn.spawnCreep.mock.calls[0];
-        expect(body).toEqual(['tough', 'move', 'move', 'move']);
+        expect(body).toEqual(['carry', 'move', 'move', 'move']);
     });
 });
 
@@ -138,7 +146,7 @@ describe('manageSpawns — RC2', () => {
 
 describe('manageSpawns — RC3 collector quota', () => {
     it('spawns up to 3 collectors at RC3 when memory.collectorQuota=3', () => {
-        const room = roomWith({ level: 3, energy: 300, harvesters: 2, collectors: 2, memory: { collectorQuota: 3 } });
+        const room = roomWith({ level: 3, energy: 300, harvesters: 2, scouts: 1, upgraders: 1, collectors: 2, memory: { collectorQuota: 3 } });
         manageSpawns(room);
         const spawn = room.find((global as any).FIND_MY_SPAWNS)[0];
         expect(spawn.spawnCreep).toHaveBeenCalled();
@@ -164,7 +172,7 @@ describe('manageSpawns — RC4 dynamic quota', () => {
     it('uses getCollectorQuota when dynamicCollectorQuota is set', () => {
         // storage=200k → quota 8; only 2 collectors → should spawn more
         const room = roomWith({
-            level: 4, energy: 300, harvesters: 2, collectors: 2,
+            level: 4, energy: 300, harvesters: 2, scouts: 1, upgraders: 1, collectors: 2,
             storage: 200000,
             memory: { dynamicCollectorQuota: true },
         });
@@ -181,16 +189,16 @@ describe('manageSpawns — RC4 dynamic quota', () => {
 describe('manageSpawns — RC5 collectors above upgraders', () => {
     it('spawns collector even when upgrader count could be increased', () => {
         const room = roomWith({
-            level: 5, energy: 660, harvesters: 2, collectors: 1,
-            memory: { collectorsAboveUpgraders: true, collectorQuota: 5 },
+            level: 5, energy: 660, harvesters: 2, scouts: 1, upgraders: 1, collectors: 1,
+            memory: { collectorQuota: 5 },
         });
         manageSpawns(room);
         const spawn = room.find((global as any).FIND_MY_SPAWNS)[0];
         expect(spawn.spawnCreep).toHaveBeenCalled();
         const [body, , opts] = spawn.spawnCreep.mock.calls[0];
         expect(opts.memory.role).toBe('collector');
-        // Should use RC5+ body at 660e
-        expect(body.filter((p: string) => p === 'attack')).toHaveLength(2);
+        // Should use top-tier body at 660e — CARRY + MOVE heavy
+        expect(body.filter((p: string) => p === 'carry')).toHaveLength(2);
     });
 });
 
@@ -211,7 +219,7 @@ describe('manageSpawns — hauler spawning', () => {
     it('spawns a hauler when containers exist and haulers < source count', () => {
         const container = makeContainer();
         const room = roomWith({
-            level: 2, energy: 300, harvesters: 2,
+            level: 2, energy: 300, harvesters: 2, scouts: 1, upgraders: 1,
             structures: [container],
             sources: [makeSource()],
         });

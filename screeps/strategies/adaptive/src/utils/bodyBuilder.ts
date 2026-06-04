@@ -3,9 +3,9 @@
 
 import { CreepRole } from '../types';
 
-export function buildBody(role: CreepRole, budget: number): BodyPartConstant[] | null {
+export function buildBody(role: CreepRole, budget: number, opts?: { mobile?: boolean }): BodyPartConstant[] | null {
     switch (role) {
-        case 'harvester':  return harvesterBody(budget);
+        case 'harvester':  return harvesterBody(budget, opts?.mobile ?? false);
         case 'hauler':     return haulerBody(budget);
         case 'upgrader':   return upgraderBody(budget);
         case 'builder':
@@ -24,9 +24,15 @@ export function buildBody(role: CreepRole, budget: number): BodyPartConstant[] |
 
 // ─── Economic roles ───────────────────────────────────────────────────────────
 
-// Stationary harvester: maximize WORK (source saturation = 6 WORK = 12e/tick).
-// Minimal CARRY + MOVE — it barely moves once assigned to a source.
-function harvesterBody(budget: number): BodyPartConstant[] | null {
+// Harvester body: stationary by default (parks at source container, maximises WORK).
+// Pass mobile:true when no containers exist (RC1 bootstrap or after containers are lost) —
+// the harvester must walk to deliver, so it needs road-speed movement.
+function harvesterBody(budget: number, mobile: boolean): BodyPartConstant[] | null {
+    if (mobile) {
+        // [W, C, M, M] = 250e: 1:1 non-MOVE:MOVE ratio → full road speed
+        if (budget < 250) return null;
+        return [WORK, CARRY, MOVE, MOVE];
+    }
     if (budget < 200) return null;
     const w = Math.min(Math.floor((budget - 100) / 100), 6); // reserve 100 for CARRY+MOVE
     return [...r(WORK, w), CARRY, MOVE];

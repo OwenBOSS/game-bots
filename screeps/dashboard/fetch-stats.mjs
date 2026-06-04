@@ -342,7 +342,8 @@ const LAYOUT      = ${layoutJson};
   if (!LAYOUT || !Object.keys(LAYOUT).length) {
     el.innerHTML = '<p style="color:#8b949e;font-size:.8em">Not yet captured — deploy bot and wait ~1000 ticks, then run fetch-stats</p>';
   } else {
-    el.innerHTML = Object.values(LAYOUT).map(room => {
+    el.innerHTML = '<div style="display:flex;flex-wrap:wrap;gap:24px;align-items:flex-start">' +
+      Object.values(LAYOUT).map(room => {
       const colored = room.ascii.split('\\n').map(line =>
         line.split('').map(ch => '<span style="color:' + (CH_COLOR[ch] || '#c9d1d9') + '">' + ch + '</span>').join('')
       ).join('\\n');
@@ -358,13 +359,13 @@ const LAYOUT      = ${layoutJson};
         room.roads.length + ' roads',
         room.sites.length + ' sites pending',
       ].join(' · ');
-      return '<div style="margin-bottom:20px">' +
+      return '<div>' +
         '<h3 style="color:#58a6ff;font-size:.85em;margin-bottom:4px">' + room.room + ' · RCL ' + room.rcl + ' · tick ' + room.tick.toLocaleString() + '</h3>' +
         '<div style="font-size:.68em;color:#8b949e;margin-bottom:6px">' + counts + '</div>' +
         '<div style="font-size:.65em;color:#8b949e;margin-bottom:6px;flex-wrap:wrap;display:flex;gap:4px">' + legend + '</div>' +
-        '<pre style="font-size:7.5px;line-height:1.15;font-family:monospace;background:#000;padding:8px;border-radius:4px;overflow:auto;display:inline-block">' + colored + '</pre>' +
+        '<pre style="font-size:10px;line-height:1.0;letter-spacing:3.5px;font-family:monospace;background:#000;padding:8px;border-radius:4px;overflow:auto;display:inline-block">' + colored + '</pre>' +
         '</div>';
-    }).join('');
+    }).join('') + '</div>';
   }
 }
 
@@ -611,7 +612,22 @@ if (SIM) {
   // ── Fan chart helper ───────────────────────────────────────────────────────
   // Renders a 2-band (p10/p90 outer, p25/p75 inner) fan chart with a p50 median line.
   // Dataset fill indices: p90 fills→index 0 (p10), p75 fills→index 2 (p25).
-  function makeFanChart(canvasId, bands, yTickFmt) {
+  // capBands: optional — adds a p50 capacity ceiling line and scales y-axis to fit.
+  function makeFanChart(canvasId, bands, yTickFmt, suggestedMax, capBands = null) {
+    const dataMax = Math.max(...bands.p90.filter(v => v != null && isFinite(v)));
+    const capMax  = capBands ? Math.max(...capBands.p90.filter(v => v != null && isFinite(v))) : 0;
+    const rawMax  = Math.max(isFinite(dataMax) ? dataMax : 0, capMax);
+    // Round up to a clean tick — coarser buckets for large cap values (storage era)
+    const roundTo = rawMax > 10_000 ? 5_000 : rawMax > 1_000 ? 100 : 10;
+    const yMax = suggestedMax ?? (rawMax > 0 ? Math.ceil(rawMax * 1.05 / roundTo) * roundTo : undefined);
+
+    const fmtE = yTickFmt ?? (v => v);
+    const capDatasets = capBands ? [
+      // index 5 — p50 capacity ceiling
+      { label: 'Capacity (p50)', data: capBands.p50, borderColor: '#4caf5099', borderWidth: 1.5,
+        borderDash: [3, 3], fill: false, pointRadius: 0, tension: 0.3 },
+    ] : [];
+
     new Chart(document.getElementById(canvasId), {
       type: 'line',
       data: {
@@ -630,6 +646,7 @@ if (SIM) {
           // index 4 — p50 median line (visible)
           { label: 'Median (p50)', data: bands.p50, borderColor: '#58a6ff', borderWidth: 2,
             borderDash: [6, 3], fill: false, pointRadius: 0, tension: 0.3 },
+          ...capDatasets,
         ],
       },
       options: {
@@ -639,28 +656,36 @@ if (SIM) {
         plugins: {
           legend: {
             labels: { color: '#8b949e', font: { size: 11 }, boxWidth: 12,
-              filter: item => ['Median (p50)'].includes(item.text) },
+              filter: item => ['Median (p50)', 'Capacity (p50)'].includes(item.text) },
           },
           tooltip: {
             callbacks: {
               title: ctx => '+' + relTicks[ctx[0].dataIndex].toLocaleString() + ' ticks',
               label: ctx => {
-                const labels = { 'p10': 'Worst 10%', 'p25': 'Lower 25%', 'p75': 'Upper 75%', 'p90': 'Best 90%', 'Median (p50)': 'Median' };
-                return (labels[ctx.dataset.label] ?? ctx.dataset.label) + ': ' + (yTickFmt ? yTickFmt(ctx.parsed.y) : ctx.parsed.y);
+                const labels = { 'p10': 'Worst 10%', 'p25': 'Lower 25%', 'p75': 'Upper 75%', 'p90': 'Best 90%', 'Median (p50)': 'Median', 'Capacity (p50)': 'Capacity ceiling' };
+                return (labels[ctx.dataset.label] ?? ctx.dataset.label) + ': ' + fmtE(ctx.parsed.y);
               },
             },
           },
         },
         scales: {
           x: { ticks: { color: '#8b949e', maxTicksLimit: 8, callback: (_v, i) => '+' + relTicks[i] + 't' }, grid: { color: '#21262d' } },
-          y: { ticks: { color: '#8b949e', callback: yTickFmt ?? (v => v) }, grid: { color: '#21262d' }, min: 0 },
+          y: { ticks: { color: '#8b949e', callback: fmtE }, grid: { color: '#21262d' }, min: 0, ...(yMax != null ? { suggestedMax: yMax } : {}) },
         },
       },
     });
   }
 
-  makeFanChart('cSimEnergy', SIM.energy,  v => Math.round(v));
-  makeFanChart('cSimCtrl',   SIM.ctrlPct, v => v + '%');
+  const ctrlStartRcl = SIM.startRcl ?? 1;
+  // Energy tick formatter: compact for large values (storage era: 50k+)
+  const energyFmt = v => v >= 1_000 ? Math.round(v / 1_000) + 'ke' : Math.round(v) + 'e';
+  makeFanChart('cSimEnergy', SIM.energy, energyFmt, null, SIM.energyCap);
+  // Use cumulative ctrl progress so RCL advances show as continuous growth, not sawtooth resets.
+  // y-axis: 0 = start of current RCL, 100 = +1 RCL gained, 200 = +2 RCLs gained, etc.
+  const ctrlYMax = ((SIM.rcl.p90.at(-1) ?? ctrlStartRcl) - ctrlStartRcl + 1.1) * 100;
+  makeFanChart('cSimCtrl', SIM.ctrlCumulative ?? SIM.ctrlPct,
+    v => { const gain = Math.floor(v / 100); const pct = Math.round(v % 100); return 'RC' + (ctrlStartRcl + gain) + (pct ? ' +' + pct + '%' : ''); },
+    ctrlYMax);
 
   // ── Build order comparison (horizontal grouped bar) ─────────────────────
   const boColors = ['#58a6ff', '#4caf50', '#ff9800'];

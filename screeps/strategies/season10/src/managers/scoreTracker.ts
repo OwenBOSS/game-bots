@@ -29,6 +29,7 @@ export function trackScores(room: Room): void {
     // Scan room for current scores
     const scores = (room.find as Function)(FIND_SCORES) as Score[];
     const totalScore = scores.reduce((sum, s) => sum + s.score, 0);
+    const wasInMap = !!Memory.scoreMap[room.name];
 
     for (const score of scores) {
         Memory.scoreCache[score.id as unknown as string] = {
@@ -40,7 +41,11 @@ export function trackScores(room: Room): void {
 
     if (totalScore > 0) {
         Memory.scoreMap[room.name] = { score: totalScore, tick: Game.time };
+        if (!wasInMap) {
+            console.log(`[scoreTracker] New score room: ${room.name} (${scores.length} scores, total=${totalScore})`);
+        }
     } else if (Memory.scoreMap[room.name]) {
         delete Memory.scoreMap[room.name];
+        console.log(`[scoreTracker] Scores cleared from ${room.name}`);
     }
 }

@@ -91,8 +91,13 @@ describe('manageConstruction — RC2: container sites', () => {
         expect(room.createConstructionSite).not.toHaveBeenCalled();
     });
 
-    it('is idempotent: skips if memory.containerSitesPlaced is true', () => {
-        const room = makeRCRoom(2, {});
+    it('is idempotent: skips when all sources are already covered', () => {
+        const source = makeSource();
+        const existingContainer = {
+            structureType: 'container',
+            pos: { x: source.pos.x, y: source.pos.y - 1, roomName: 'W1N1' },
+        };
+        const room = makeRCRoom(2, { sources: [source], structures: [existingContainer] });
         room.memory.containerSitesPlaced = true;
         manageConstruction(room);
         expect(room.createConstructionSite).not.toHaveBeenCalled();
@@ -163,10 +168,10 @@ describe('manageConstruction — RC4: storage site', () => {
     });
 });
 
-describe('manageConstruction — below RC2', () => {
-    it('does nothing at RC1', () => {
+describe('manageConstruction — RC1', () => {
+    it('places container sites at RC1', () => {
         const room = makeRCRoom(1);
         manageConstruction(room);
-        expect(room.createConstructionSite).not.toHaveBeenCalled();
+        expect(room.createConstructionSite).toHaveBeenCalled();
     });
 });

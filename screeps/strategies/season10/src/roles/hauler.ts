@@ -65,19 +65,19 @@ function deliver(creep: Creep): void {
         return;
     }
 
-    // Priority 2: storage — long-term energy buffer
+    // Priority 2: upgrade controller — RC progression unlocks more spawning capacity
+    const ctrl = creep.room.controller;
+    if (ctrl) {
+        if (creep.upgradeController(ctrl) === ERR_NOT_IN_RANGE) moveTo(creep, ctrl, { reusePath: 5 });
+        return;
+    }
+
+    // Priority 3: storage overflow
     const storage = creep.room.storage;
     if (storage && storage.store.getFreeCapacity(RESOURCE_ENERGY) > 0) {
         if (creep.transfer(storage, RESOURCE_ENERGY) === ERR_NOT_IN_RANGE) {
             moveTo(creep, storage, { reusePath: 5 });
         }
-        return;
-    }
-
-    // Priority 3: upgrade controller to keep RC progressing
-    const ctrl = creep.room.controller;
-    if (ctrl && creep.upgradeController(ctrl) === ERR_NOT_IN_RANGE) {
-        moveTo(creep, ctrl, { reusePath: 5 });
     }
 }
 

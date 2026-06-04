@@ -10,8 +10,18 @@ export function runHarvester(creep: Creep): void {
     const container = findNearbyContainer(source);
     if (container) {
         runStationary(creep, source, container);
-    } else {
+        return;
+    }
+
+    const hasHauler = creep.room.find(FIND_MY_CREEPS).some(
+        (c: Creep) => c.memory.role === 'hauler'
+    );
+    if (hasHauler) {
+        // Hauler is active — stay at source and drop; hauler will collect
         runMobile(creep, source);
+    } else {
+        // No hauler yet — deliver manually so spawn/controller don't starve
+        runMobileDeliver(creep, source);
     }
 }
 
@@ -26,31 +36,38 @@ function runStationary(creep: Creep, source: Source, container: StructureContain
     }
 }
 
-function runMobile(creep: Creep, source: Source): void {
-    if (creep.memory.working && creep.store[RESOURCE_ENERGY] === 0) creep.memory.working = false;
-    if (!creep.memory.working && creep.store.getFreeCapacity() === 0) creep.memory.working = true;
+// No container, no hauler: deliver to spawn/controller manually until hauler spawns.
+function runMobileDeliver(creep: Creep, source: Source): void {
+    const mem = creep.memory as any;
+    if (mem.working && creep.store[RESOURCE_ENERGY] === 0) mem.working = false;
+    if (!mem.working && creep.store.getFreeCapacity() === 0) mem.working = true;
 
-    if (creep.memory.working) {
+    if (mem.working) {
         const target = creep.pos.findClosestByPath(FIND_MY_STRUCTURES, {
-            filter: (s): s is StructureSpawn | StructureExtension =>
+            filter: (s: AnyStructure) =>
                 (s.structureType === STRUCTURE_SPAWN || s.structureType === STRUCTURE_EXTENSION) &&
-                s.store.getFreeCapacity(RESOURCE_ENERGY) > 0,
+                (s as StructureSpawn | StructureExtension).store.getFreeCapacity(RESOURCE_ENERGY) > 0,
         });
         if (target) {
-            if (creep.transfer(target, RESOURCE_ENERGY) === ERR_NOT_IN_RANGE) {
+            if (creep.transfer(target as any, RESOURCE_ENERGY) === ERR_NOT_IN_RANGE) {
                 moveTo(creep, target, { reusePath: 5 });
             }
-        } else {
-            // Spawn/extensions full — dump into controller to keep progressing
-            const ctrl = creep.room.controller;
-            if (ctrl && creep.upgradeController(ctrl) === ERR_NOT_IN_RANGE) {
-                moveTo(creep, ctrl, { reusePath: 5 });
-            }
+            return;
         }
-    } else {
-        if (creep.harvest(source) === ERR_NOT_IN_RANGE) {
-            moveTo(creep, source, { reusePath: 5 });
+        const ctrl = creep.room.controller;
+        if (ctrl && creep.upgradeController(ctrl) === ERR_NOT_IN_RANGE) {
+            moveTo(creep, ctrl, { reusePath: 5 });
         }
+        return;
+    }
+
+    if (creep.harvest(source) === ERR_NOT_IN_RANGE) moveTo(creep, source, { reusePath: 5 });
+}
+
+// No container, hauler present: stay at source and drop energy on the ground.
+function runMobile(creep: Creep, source: Source): void {
+    if (creep.harvest(source) === ERR_NOT_IN_RANGE) {
+        moveTo(creep, source, { reusePath: 10 });
     }
 }
 

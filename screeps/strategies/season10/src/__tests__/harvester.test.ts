@@ -121,50 +121,48 @@ describe('runHarvester — stationary (container present)', () => {
     });
 });
 
-describe('runHarvester — mobile (no container)', () => {
-    it('harvests from source when not working', () => {
-        const source = makeSource(); // no container
+describe('runHarvester — mobile, no hauler (delivers manually)', () => {
+    it('harvests from source when empty', () => {
+        const source = makeSource();
         (global as any).Game.getObjectById = vi.fn(() => source);
-
         const creep = makeHarvesterCreep({ energy: 0, working: false });
         runHarvester(creep);
         expect(creep.harvest).toHaveBeenCalledWith(source);
     });
 
-    it('delivers to spawn/extensions when full', () => {
+    it('delivers to spawn when full and no hauler', () => {
         const source = makeSource();
         (global as any).Game.getObjectById = vi.fn(() => source);
         const spawn = { id: 'sp1', structureType: 'spawn', store: { getFreeCapacity: () => 100 } };
-
         const creep = makeHarvesterCreep({ energy: 200, cap: 200, working: true });
         creep.pos.findClosestByPath = vi.fn(() => spawn);
         runHarvester(creep);
         expect(creep.transfer).toHaveBeenCalledWith(spawn, (global as any).RESOURCE_ENERGY);
     });
 
-    it('upgrades controller as overflow when spawn is full', () => {
+    it('moves toward source when not in range', () => {
         const source = makeSource();
         (global as any).Game.getObjectById = vi.fn(() => source);
-
-        const creep = makeHarvesterCreep({ energy: 200, cap: 200, working: true });
-        creep.pos.findClosestByPath = vi.fn(() => null); // no spawn with capacity
+        const creep = makeHarvesterCreep({ energy: 0 });
+        creep.harvest = vi.fn(() => (global as any).ERR_NOT_IN_RANGE);
         runHarvester(creep);
-        expect(creep.upgradeController).toHaveBeenCalled();
+        expect(creep.moveTo).toHaveBeenCalled();
     });
+});
 
-    it('switches to delivering when energy is full', () => {
+describe('runHarvester — mobile, hauler present (drops on ground)', () => {
+    it('stays at source and harvests even when full', () => {
         const source = makeSource();
         (global as any).Game.getObjectById = vi.fn(() => source);
-        const creep = makeHarvesterCreep({ energy: 200, cap: 200, working: false });
+        const creep = makeHarvesterCreep({ energy: 200, cap: 200 });
+        // Inject a hauler into the room
+        creep.room.find = vi.fn((type: number) => {
+            if (type === (global as any).FIND_SOURCES) return [source];
+            if (type === (global as any).FIND_MY_CREEPS) return [{ memory: { role: 'hauler' } }];
+            return [];
+        });
         runHarvester(creep);
-        expect(creep.memory.working).toBe(true);
-    });
-
-    it('switches to harvesting when energy is empty', () => {
-        const source = makeSource();
-        (global as any).Game.getObjectById = vi.fn(() => source);
-        const creep = makeHarvesterCreep({ energy: 0, working: true });
-        runHarvester(creep);
-        expect(creep.memory.working).toBe(false);
+        expect(creep.harvest).toHaveBeenCalledWith(source);
+        expect(creep.transfer).not.toHaveBeenCalled();
     });
 });

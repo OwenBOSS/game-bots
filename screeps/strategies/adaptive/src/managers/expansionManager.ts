@@ -7,9 +7,10 @@
 
 import { ExpansionState } from '../types';
 
-const MIN_RCL_TO_EXPAND = 4;
-const BOOTSTRAP_HAULERS  = 2;
-const BOOTSTRAP_BUILDERS = 2;
+const MIN_RCL_TO_EXPAND    = 4;
+const BOOTSTRAP_HARVESTERS = 2;
+const BOOTSTRAP_HAULERS    = 2;
+const BOOTSTRAP_BUILDERS   = 2;
 
 export function manageExpansion(mainRoom: Room): void {
     const state: ExpansionState = Memory.expansionState ?? 'IDLE';
@@ -57,8 +58,16 @@ export function manageExpansion(mainRoom: Room): void {
             }
 
             if (newRoom.find(FIND_MY_SPAWNS).length > 0) {
-                Memory.expansionState = 'ACTIVE';
-                console.log(`[adaptive] Expansion -> ACTIVE ${roomName}`);
+                // Delay ACTIVE until the new room has at least one harvester homed to it.
+                // Without this, rooms that already have a spawn skip BOOTSTRAPPING entirely,
+                // leaving them with no harvesters and a spawn that can't afford to spawn one.
+                const hasHomeHarvester = Object.values(Game.creeps).some(
+                    c => c.memory.homeRoom === roomName && c.memory.role === 'harvester'
+                );
+                if (hasHomeHarvester) {
+                    Memory.expansionState = 'ACTIVE';
+                    console.log(`[adaptive] Expansion -> ACTIVE ${roomName}`);
+                }
             }
             // spawnManager sends bootstrap workers from main room
             break;
@@ -85,17 +94,19 @@ function findExpansionTarget(): string | null {
     return candidates.length > 0 ? candidates[0][0] : null;
 }
 
-// How many bootstrap workers the main room should send to the new room
-export function bootstrapTargets(): { hauler: number; builder: number } {
-    if (Memory.expansionState !== 'BOOTSTRAPPING') return { hauler: 0, builder: 0 };
+// How many bootstrap workers the main room should send to the new room.
+// Harvesters are included so the new room's spawn gets filled before ACTIVE state.
+export function bootstrapTargets(): { harvester: number; hauler: number; builder: number } {
+    if (Memory.expansionState !== 'BOOTSTRAPPING') return { harvester: 0, hauler: 0, builder: 0 };
     const roomName = Memory.expansionRoomName;
-    if (!roomName) return { hauler: 0, builder: 0 };
+    if (!roomName) return { harvester: 0, hauler: 0, builder: 0 };
 
     const inNewRoom = Object.values(Game.creeps).filter(
-        c => c.memory.targetRoomName === roomName
+        c => c.memory.homeRoom === roomName
     );
     return {
-        hauler:  Math.max(0, BOOTSTRAP_HAULERS  - inNewRoom.filter(c => c.memory.role === 'hauler').length),
-        builder: Math.max(0, BOOTSTRAP_BUILDERS - inNewRoom.filter(c => c.memory.role === 'builder').length),
+        harvester: Math.max(0, BOOTSTRAP_HARVESTERS - inNewRoom.filter(c => c.memory.role === 'harvester').length),
+        hauler:    Math.max(0, BOOTSTRAP_HAULERS    - inNewRoom.filter(c => c.memory.role === 'hauler').length),
+        builder:   Math.max(0, BOOTSTRAP_BUILDERS   - inNewRoom.filter(c => c.memory.role === 'builder').length),
     };
 }

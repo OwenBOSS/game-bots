@@ -11,6 +11,8 @@ import { runCollector } from './roles/collector';
 import { runScout } from './roles/scout';
 import { runBuilder } from './roles/builder';
 import { runHunter } from './roles/hunter';
+import { runUpgrader } from './roles/upgrader';
+import { runDefender } from './roles/defender';
 
 export function loop(): void {
     // 1. Reset per-tick find() cache (CPU budget: avoids duplicate room.find calls)
@@ -25,6 +27,7 @@ export function loop(): void {
     if (!Memory.scoreMap)        Memory.scoreMap        = {};
     if (!Memory.scoreCache)      Memory.scoreCache       = {};
     if (!Memory.knownRooms)      Memory.knownRooms       = [];
+    if (!Memory.roomIntel)       Memory.roomIntel        = {};
     if (!Memory.observerTargets) Memory.observerTargets  = [];
     if (Memory.observerIndex === undefined) Memory.observerIndex = 0;
 
@@ -62,13 +65,39 @@ export function loop(): void {
             case 'scout':     runScout(creep);     break;
             case 'builder':   runBuilder(creep);   break;
             case 'hunter':    runHunter(creep);    break;
+            case 'upgrader':  runUpgrader(creep);  break;
+            case 'defender':  runDefender(creep);  break;
         }
     }
 
-    // 7. Debug log every 100 ticks
-    if (Game.time % 100 === 0) {
-        const scoreRooms = Object.keys(Memory.scoreMap).join(', ') || 'none';
-        const cacheSize  = Object.keys(Memory.scoreCache).length;
-        console.log(`[season10] tick=${Game.time} score rooms: ${scoreRooms} cached: ${cacheSize}`);
+    // 7. Stats dump every 50 ticks
+    if (Game.time % 50 === 0) {
+        for (const roomName in Game.rooms) {
+            const room = Game.rooms[roomName];
+            if (!room.controller?.my) continue;
+
+            const allCreeps = Object.values(Game.creeps).filter(c => c.room.name === roomName);
+            const counts: Record<string, number> = {};
+            for (const c of allCreeps) {
+                counts[c.memory.role] = (counts[c.memory.role] ?? 0) + 1;
+            }
+
+            const topScoreRooms = Object.entries(Memory.scoreMap ?? {})
+                .sort((a, b) => b[1].score - a[1].score)
+                .slice(0, 3)
+                .map(([r, d]) => `${r}(${d.score})`);
+
+            console.log(`=== season10:stats:${roomName}:${Game.time} ===`);
+            console.log(JSON.stringify({
+                tick: Game.time,
+                rcl: room.controller?.level,
+                energy: { avail: room.energyAvailable, cap: room.energyCapacityAvailable },
+                creeps: counts,
+                totalCreeps: allCreeps.length,
+                scoreRooms: Object.keys(Memory.scoreMap ?? {}).length,
+                topScores: topScoreRooms,
+                cachedScores: Object.keys(Memory.scoreCache ?? {}).length,
+            }));
+        }
     }
 }

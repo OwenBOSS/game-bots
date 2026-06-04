@@ -31,12 +31,15 @@ build strat=strategy:
 watch strat=strategy:
     cd strategies/{{strat}}; npm run watch
 
-# Deploy all active strategies
-deploy-all:
-    node dashboard/set-regime.mjs adaptive
-    cd strategies/adaptive; npm run deploy
+# Build and deploy season10 to the Screeps "default" branch
+deploy-season10:
     node dashboard/set-regime.mjs season10
     cd strategies/season10; npm run deploy
+
+# Deploy all active strategies
+deploy-all:
+    just deploy adaptive
+    just deploy-season10
 
 # Fetch latest stats from Screeps API and regenerate the dashboard HTML.
 # Requires $env:SCREEPS_TOKEN or a .env file with SCREEPS_TOKEN=<token>

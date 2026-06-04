@@ -42,6 +42,14 @@ export function manageSpawns(room: Room): void {
     // Safe mode: no combat units
     const inSafeMode = (room.controller?.safeMode ?? 0) > 0;
 
+    // ── Bootstrap: zero creeps → always spawn harvester first ────────────────
+    // Guards against the emergency-upgrader check firing on a freshly claimed room
+    // before any energy infrastructure exists.
+    if (allHomeCreeps.length === 0) {
+        trySpawn(spawn, 'harvester', room.energyAvailable);
+        return;
+    }
+
     // ── Expansion priority ────────────────────────────────────────────────────
     if (Memory.expansionState === 'CLAIMING' && counts.claimer === 0 && Memory.expansionTarget) {
         trySpawn(spawn, 'claimer', room.energyAvailable, { targetRoomName: Memory.expansionTarget });
@@ -49,8 +57,13 @@ export function manageSpawns(room: Room): void {
     }
     if (Memory.expansionState === 'BOOTSTRAPPING') {
         const bt = bootstrapTargets();
-        if (bt.builder > 0) { trySpawn(spawn, 'builder', room.energyAvailable, { targetRoomName: Memory.expansionRoomName }); return; }
-        if (bt.hauler  > 0) { trySpawn(spawn, 'hauler',  room.energyAvailable, { targetRoomName: Memory.expansionRoomName }); return; }
+        const expRoom = Memory.expansionRoomName;
+        // Bootstrap workers are homed to the expansion room so the new room's spawn
+        // manager counts them (prevents over-spawning) and harvesters use mobile mode
+        // to deliver energy directly to the new room's spawn.
+        if (bt.harvester > 0) { trySpawn(spawn, 'harvester', room.energyAvailable, { homeRoom: expRoom, targetRoomName: expRoom }); return; }
+        if (bt.builder   > 0) { trySpawn(spawn, 'builder',   room.energyAvailable, { homeRoom: expRoom, targetRoomName: expRoom }); return; }
+        if (bt.hauler    > 0) { trySpawn(spawn, 'hauler',    room.energyAvailable, { homeRoom: expRoom, targetRoomName: expRoom }); return; }
     }
 
     // ── Emergency: controller downgrade prevention ────────────────────────────
@@ -228,16 +241,20 @@ export function pruneExcessCreeps(room: Room): void {
         }
     }
 
-    // Emergency energy: suicide the largest upgrader only.
-    // Scouts are excluded — a [MOVE] body costs nothing to maintain (no CPU overhead,
-    // no energy drain) and losing scout coverage means losing remote-room intel.
+    // Emergency energy: suicide the largest upgrader only — but only when harvesters
+    // are present to actually generate more energy. Without harvesters, killing the
+    // upgrader doesn't help and causes a spawn-kill death spiral (200e upgrader spawns,
+    // drains to CRITICAL, gets killed, repeat).
     if (status?.level === 'CRITICAL') {
-        const expensive = creeps
-            .filter(c => c.memory.role === 'upgrader')
-            .sort((a, b) => (b.body.length) - (a.body.length));
-        if (expensive.length > 0) {
-            console.log(`[adaptive] CRITICAL energy — retiring upgrader`);
-            expensive[0].suicide();
+        const harvesters = creeps.filter(c => c.memory.role === 'harvester');
+        if (harvesters.length > 0) {
+            const expensive = creeps
+                .filter(c => c.memory.role === 'upgrader')
+                .sort((a, b) => (b.body.length) - (a.body.length));
+            if (expensive.length > 0) {
+                console.log(`[adaptive] CRITICAL energy — retiring upgrader`);
+                expensive[0].suicide();
+            }
         }
     }
 
@@ -315,7 +332,9 @@ function trySpawn(
     energy: number,
     extraMemory: Partial<CreepMemory> = {},
 ): void {
-    const body = buildBody(role, energy);
+    const hasContainers = spawn.room.find(FIND_STRUCTURES)
+        .some(s => s.structureType === STRUCTURE_CONTAINER);
+    const body = buildBody(role, energy, { mobile: role === 'harvester' && !hasContainers });
     if (!body) return;
 
     const name   = `${role}_${Game.time}`;
