@@ -8,6 +8,9 @@
     "watch": "rollup -c --watch",
     "clean": "rimraf dist",
     "deploy": "rollup -c && node -e \"const fs=require('fs'),p='C:/Users/owenb/AppData/Local/Screeps/scripts/screeps.com/adaptive';fs.mkdirSync(p,{recursive:true});fs.copyFileSync('dist/main.js',p+'/main.js');console.log('Deployed to branch: adaptive')\"",
+    "deploy:api": "rollup -c && node deploy.mjs",
+    "deploy:default": "rollup -c && node deploy.mjs default",
+    "deploy:ptr": "rollup -c && SCREEPS_BRANCH=ptr node deploy.mjs",
     "test": "vitest run",
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage"

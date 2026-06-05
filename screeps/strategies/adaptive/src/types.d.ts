@@ -139,6 +139,8 @@ declare global {
         // Set to true from console to force an immediate layout capture this tick
         captureLayout?: boolean;
         captureLayoutAt?: number;
+        // Raid economy tracking — rolling 500t window per home room
+        raidEconomy?: Record<string, { entries: Array<{ tick: number; captured: number; spent: number }> }>;
     }
 
     interface StatSnapshot {

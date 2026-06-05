@@ -306,7 +306,16 @@ function runHauler(creep) {
 function collectRemote(creep) {
     const remote = creep.memory.remoteRoom;
     if (creep.room.name !== remote) {
-        moveToRoom$6(creep, remote);
+        // Not in the remote room. If carrying energy, commit to delivery so we don't
+        // get sent back the moment we enter the home room (the root cause of the
+        // "jumping in and out" oscillation bug).
+        if (creep.store[RESOURCE_ENERGY] > 0) {
+            creep.memory.working = true;
+            deliverRemote(creep);
+        }
+        else {
+            moveToRoom$6(creep, remote);
+        }
         return;
     }
     // Tombstones first (about to vanish)
@@ -335,10 +344,16 @@ function collectRemote(creep) {
             moveTo(creep, dropped, { reusePath: 3 });
         return;
     }
-    // Nothing to collect — go home rather than idle
-    const home = creep.memory.homeRoom;
-    if (home)
-        moveToRoom$6(creep, home);
+    // Nothing to collect in the remote room.
+    if (creep.store[RESOURCE_ENERGY] > 0) {
+        // Commit to delivering what we have. Without this, the hauler starts moving
+        // home but working=false, so the moment the container refills it turns back —
+        // the root cause of the oscillation bug.
+        creep.memory.working = true;
+        deliverRemote(creep);
+    }
+    // If empty, stay put. Going home empty just causes another round-trip with nothing
+    // to show for it; it's cheaper to wait for the harvester to fill the container.
 }
 function deliverRemote(creep) {
     const home = creep.memory.homeRoom;
@@ -415,10 +430,16 @@ function collect$1(creep) {
         }
         return;
     }
-    // 5. Direct harvest as last resort
-    const source = creep.pos.findClosestByPath(FIND_SOURCES_ACTIVE);
-    if (source && creep.harvest(source) === ERR_NOT_IN_RANGE) {
-        moveTo(creep, source, { reusePath: 5 });
+    // 5. Last resort: harvest only from a source that has no dedicated harvester parked
+    // on it. Avoids competing with stationary harvesters for mining spots — haulers
+    // competing would block the harvester from its own container tile.
+    const emptySource = creep.pos.findClosestByPath(FIND_SOURCES_ACTIVE, {
+        filter: src => src.pos.findInRange(FIND_MY_CREEPS, 1, {
+            filter: c => c.memory.role === 'harvester',
+        }).length === 0,
+    });
+    if (emptySource && creep.harvest(emptySource) === ERR_NOT_IN_RANGE) {
+        moveTo(creep, emptySource, { reusePath: 5 });
     }
 }
 function deliver$1(creep) {
@@ -4604,7 +4625,7 @@ function manageObserver(room) {
 }
 
 // Updated automatically by `just deploy` — do not edit manually
-const REGIME = '2026-06-04-4a2d67a';
+const REGIME = '2026-06-05-5ba8501';
 
 const REPORT_INTERVAL = 50;
 const LOG_INTERVAL = 200;

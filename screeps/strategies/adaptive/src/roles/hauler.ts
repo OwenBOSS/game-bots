@@ -42,7 +42,15 @@ function collectRemote(creep: Creep): void {
     const remote = creep.memory.remoteRoom!;
 
     if (creep.room.name !== remote) {
-        moveToRoom(creep, remote);
+        // Not in the remote room. If carrying energy, commit to delivery so we don't
+        // get sent back the moment we enter the home room (the root cause of the
+        // "jumping in and out" oscillation bug).
+        if (creep.store[RESOURCE_ENERGY] > 0) {
+            creep.memory.working = true;
+            deliverRemote(creep);
+        } else {
+            moveToRoom(creep, remote);
+        }
         return;
     }
 
@@ -73,9 +81,16 @@ function collectRemote(creep: Creep): void {
         return;
     }
 
-    // Nothing to collect — go home rather than idle
-    const home = creep.memory.homeRoom;
-    if (home) moveToRoom(creep, home);
+    // Nothing to collect in the remote room.
+    if (creep.store[RESOURCE_ENERGY] > 0) {
+        // Commit to delivering what we have. Without this, the hauler starts moving
+        // home but working=false, so the moment the container refills it turns back —
+        // the root cause of the oscillation bug.
+        creep.memory.working = true;
+        deliverRemote(creep);
+    }
+    // If empty, stay put. Going home empty just causes another round-trip with nothing
+    // to show for it; it's cheaper to wait for the harvester to fill the container.
 }
 
 function deliverRemote(creep: Creep): void {
@@ -158,10 +173,16 @@ function collect(creep: Creep): void {
         return;
     }
 
-    // 5. Direct harvest as last resort
-    const source = creep.pos.findClosestByPath(FIND_SOURCES_ACTIVE);
-    if (source && creep.harvest(source) === ERR_NOT_IN_RANGE) {
-        moveTo(creep, source, { reusePath: 5 });
+    // 5. Last resort: harvest only from a source that has no dedicated harvester parked
+    // on it. Avoids competing with stationary harvesters for mining spots — haulers
+    // competing would block the harvester from its own container tile.
+    const emptySource = creep.pos.findClosestByPath(FIND_SOURCES_ACTIVE, {
+        filter: src => src.pos.findInRange(FIND_MY_CREEPS, 1, {
+            filter: c => c.memory.role === 'harvester',
+        }).length === 0,
+    });
+    if (emptySource && creep.harvest(emptySource) === ERR_NOT_IN_RANGE) {
+        moveTo(creep, emptySource, { reusePath: 5 });
     }
 }
 
