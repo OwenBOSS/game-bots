@@ -56,14 +56,29 @@ function loot(creep: Creep): void {
         return;
     }
 
-    // 3. Nothing in current room — if a scavenge target room is set, go there
+    // 3. Nothing in current room — check any other visible room with free energy
+    //    (handles adjacent mining/remote rooms that aren't combat scavenge targets)
     const scavengeRoom = creep.memory.scavengeRoom;
+    if (!scavengeRoom) {
+        const lootableRoom = Object.values(Game.rooms).find(r => {
+            if (r.name === creep.room.name) return false;
+            return r.find(FIND_DROPPED_RESOURCES, {
+                filter: res => res.resourceType === RESOURCE_ENERGY && res.amount >= MIN_LOOT_AMOUNT,
+            }).length > 0;
+        });
+        if (lootableRoom) {
+            moveToRoom(creep, lootableRoom.name);
+            return;
+        }
+    }
+
+    // 4. If a scavenge target room is set, go there
     if (scavengeRoom && creep.room.name !== scavengeRoom) {
         moveToRoom(creep, scavengeRoom);
         return;
     }
 
-    // 4. In the scavenge room — pick up anything there too
+    // 5. In the scavenge room — pick up anything there too
     if (scavengeRoom && creep.room.name === scavengeRoom) {
         const remoteDropped = creep.pos.findClosestByPath(FIND_DROPPED_RESOURCES, {
             filter: r => r.resourceType === RESOURCE_ENERGY && r.amount >= MIN_LOOT_AMOUNT,
@@ -88,7 +103,7 @@ function loot(creep: Creep): void {
         return;
     }
 
-    // 5. Nothing to loot anywhere — idle near spawn
+    // 6. Nothing to loot anywhere — idle near spawn
     if (!isHome(creep)) { travelHome(creep); return; }
     const spawn = creep.pos.findClosestByPath(FIND_MY_SPAWNS);
     if (spawn) moveTo(creep,spawn, { reusePath: 10 });
