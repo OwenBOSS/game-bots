@@ -21,7 +21,7 @@ default:
 #        just deploy adaptive "added hauler boost"  (deploy with description)
 deploy strat=strategy desc="":
     node dashboard/set-regime.mjs {{strat}} {{desc}}
-    cd strategies/{{strat}}; npm run deploy
+    cd strategies/{{strat}}; npm run deploy:api
 
 # Build only (no deploy, no regime tag)
 build strat=strategy:
@@ -46,6 +46,13 @@ deploy-all:
 # Get your token at: https://screeps.com/a/#!/account/auth-tokens
 fetch-stats:
     node dashboard/fetch-stats.mjs
+    Invoke-Item dashboard/index.html
+
+# Fetch latest stats from the Season shard and regenerate the season10 dashboard.
+# Requires $env:SCREEPS_TOKEN or a .env file with SCREEPS_TOKEN=<token>
+fetch-stats-season10:
+    node dashboard/fetch-stats-season10.mjs
+    Invoke-Item dashboard/season10.html
 
 # Fetch latest stats, analyze performance by regime, and write
 # screeps/dashboard/suggested-changes.md with targeted fix recommendations.
