@@ -1,6 +1,7 @@
 # Screeps bot build & deploy
 # Usage: just deploy            — build & deploy the active strategy (adaptive)
 #        just deploy season10   — build & deploy a specific strategy
+#        just deploy fortified  — build & deploy the fortified-source strategy
 #        just build             — build only, no copy
 
 set shell := ["powershell.exe", "-c"]
@@ -35,6 +36,15 @@ watch strat=strategy:
 deploy-season10:
     node dashboard/set-regime.mjs season10
     cd strategies/season10; npm run deploy
+
+# Build and deploy fortified using local copy (no API key needed)
+deploy-fortified:
+    node dashboard/set-regime.mjs fortified
+    cd strategies/fortified; npm run deploy
+
+# Run fortified tests
+test-fortified:
+    cd strategies/fortified; npm test
 
 # Deploy all active strategies
 deploy-all:
